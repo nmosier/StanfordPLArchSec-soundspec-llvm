@@ -1572,6 +1572,26 @@ def int_annotation : DefaultAttrsIntrinsic<
 def int_codeview_annotation : DefaultAttrsIntrinsic<[], [llvm_metadata_ty],
                                         [IntrInaccessibleMemOnly, IntrNoDuplicate]>;
 
+//===---------------------- SoundSpec Unsafe Region Intrinsics ------------===//
+//
+// `llvm.unsafe.in.<T>(<T> value, i32 imm scope_id)` and
+// `llvm.unsafe.out.<T>(<T> value, i32 imm scope_id)` are pure
+// identity-passthrough scope-boundary markers used by SoundSpec to
+// delimit speculation-unsafe regions in the IR. Each call returns its
+// first argument unchanged; semantics: no memory access, no side
+// effects, freely speculatable (hoistable). The second argument is an
+// immediate scope ID (same `u32` as rustc's MIR `unsafe_scope` /
+// `!unsafe !N` MDNode payload).
+def int_unsafe_in : PureIntrinsic<
+    [llvm_any_ty],
+    [LLVMMatchType<0>, llvm_i32_ty],
+    [ImmArg<ArgIndex<1>>]>;
+
+def int_unsafe_out : PureIntrinsic<
+    [llvm_any_ty],
+    [LLVMMatchType<0>, llvm_i32_ty],
+    [ImmArg<ArgIndex<1>>]>;
+
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //
 def int_init_trampoline : DefaultAttrsIntrinsic<
