@@ -137,6 +137,9 @@ void llvm::detachDeadBlocks(ArrayRef<BasicBlock *> BBs,
 
     UniqueEHRetBlocksToDelete.clear();
 
+    for (Instruction &I : *BB)
+      I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+
     // Detaching and emptying the current basic block.
     emptyAndDetachBlock(BB, Updates, KeepOneInputPHIs);
   }
