@@ -845,7 +845,8 @@ private:
 } // end anonymous namespace
 
 static void eraseTerminatorAndDCECond(Instruction *TI,
-                                      MemorySSAUpdater *MSSAU = nullptr) {
+                                      MemorySSAUpdater *MSSAU = nullptr,
+                                      bool UnsafeOK = false) {
   Instruction *Cond = nullptr;
   if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
     Cond = dyn_cast<Instruction>(SI->getCondition());
@@ -856,7 +857,7 @@ static void eraseTerminatorAndDCECond(Instruction *TI,
     Cond = dyn_cast<Instruction>(IBI->getAddress());
   }
 
-  TI->eraseFromParent();
+  TI->eraseFromParentWithUnsafe(UnsafeOK);
   if (Cond)
     RecursivelyDeleteTriviallyDeadInstructions(Cond, nullptr, MSSAU);
 }
@@ -5716,7 +5717,9 @@ bool SimplifyCFGOpt::simplifyUnreachable(UnreachableInst *UI) {
 
     // Delete this instruction (any uses are guaranteed to be dead)
     BBI->replaceAllUsesWith(PoisonValue::get(BBI->getType()));
-    BBI->eraseFromParent();
+    // [soundspec] It's OK to delete an unsafe instruction here because
+    // it is dead.
+    BBI->eraseFromParentWithUnsafe();
     Changed = true;
   }
 
@@ -5731,13 +5734,14 @@ bool SimplifyCFGOpt::simplifyUnreachable(UnreachableInst *UI) {
   for (BasicBlock *Predecessor : Preds) {
     Instruction *TI = Predecessor->getTerminator();
     IRBuilder<> Builder(TI);
+    Builder.SetUnsafeMetadata(TI->getMetadata(LLVMContext::MD_unsafe));
     if (auto *BI = dyn_cast<BranchInst>(TI)) {
       // We could either have a proper unconditional branch,
       // or a degenerate conditional branch with matching destinations.
       if (all_of(BI->successors(),
                  [BB](auto *Successor) { return Successor == BB; })) {
         new UnreachableInst(TI->getContext(), TI->getIterator());
-        TI->eraseFromParent();
+        TI->eraseFromParentWithUnsafe();
         Changed = true;
       } else {
         assert(BI->isConditional() && "Can't get here with an uncond branch.");
@@ -5756,7 +5760,7 @@ bool SimplifyCFGOpt::simplifyUnreachable(UnreachableInst *UI) {
         if (Options.AC)
           Options.AC->registerAssumption(cast<AssumeInst>(Assumption));
 
-        eraseTerminatorAndDCECond(BI);
+        eraseTerminatorAndDCECond(BI, nullptr, true);
         Changed = true;
       }
       if (DTU)
