@@ -604,6 +604,10 @@ void Function::stealArgumentListFrom(Function &Src) {
 }
 
 void Function::deleteBodyImpl(bool ShouldDrop) {
+  // Remove all !unsafe metadata.
+  for (Instruction &I : instructions(*this))
+    I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+        
   setIsMaterializable(false);
 
   for (BasicBlock &BB : *this)

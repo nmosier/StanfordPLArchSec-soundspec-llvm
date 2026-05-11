@@ -1970,6 +1970,11 @@ bool llvm::canConstantFoldCallTo(const CallBase *Call, const Function *F) {
   case Intrinsic::experimental_constrained_rint:
   case Intrinsic::experimental_constrained_fcmp:
   case Intrinsic::experimental_constrained_fcmps:
+
+  // [soundspec] I think it's OK to propagate constants through
+  // unsafe intrinsics.
+  case Intrinsic::unsafe_in:
+  case Intrinsic::unsafe_out:
     return true;
   default:
     return false;
@@ -3268,6 +3273,11 @@ static Constant *ConstantFoldIntrinsicCall2(Intrinsic::ID IntrinsicID, Type *Ty,
                                             ArrayRef<Constant *> Operands,
                                             const CallBase *Call) {
   assert(Operands.size() == 2 && "Wrong number of operands.");
+
+  if ((IntrinsicID == Intrinsic::unsafe_in ||
+       IntrinsicID == Intrinsic::unsafe_out)) {
+    return Operands[0];
+  }
 
   if (Ty->isFloatingPointTy()) {
     // TODO: We should have undef handling for all of the FP intrinsics that
