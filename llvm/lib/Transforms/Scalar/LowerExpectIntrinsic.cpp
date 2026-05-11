@@ -396,7 +396,7 @@ static bool lowerExpectIntrinsic(Function &F) {
         handlePhiDef(CI);
         Value *Exp = CI->getArgOperand(0);
         CI->replaceAllUsesWith(Exp);
-        CI->eraseFromParent();
+        CI->eraseFromParentWithUnsafe();
         Changed = true;
       }
     }
