@@ -1081,6 +1081,16 @@ protected:
 private:
   /// Create a copy of this instruction.
   Instruction *cloneImpl() const;
+
+public:
+  MDNode *takeMetadata(unsigned KindID);
+  MDNode *takeMetadata(StringRef Kind);
+
+  /// This method unlinks 'this' from the containing basic block and deletes it.
+  /// Does not abort if it has unsafe metadata.
+  /// \returns an iterator pointing to the element after the erased one
+  LLVM_ABI InstListType::iterator eraseFromParentWithUnsafe(bool UnsafeOK = true);
+
 };
 
 inline void ilist_alloc_traits<Instruction>::deleteNode(Instruction *V) {

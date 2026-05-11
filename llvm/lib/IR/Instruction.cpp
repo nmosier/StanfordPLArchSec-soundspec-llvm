@@ -1407,3 +1407,22 @@ Instruction *Instruction::clone() const {
   New->copyMetadata(*this);
   return New;
 }
+
+MDNode *Instruction::takeMetadata(unsigned KindID) {
+  MDNode *MD = getMetadata(KindID);
+  setMetadata(KindID, nullptr);
+  return MD;
+}
+
+MDNode *Instruction::takeMetadata(StringRef Kind) {
+  MDNode *MD = getMetadata(Kind);
+  setMetadata(Kind, nullptr);
+  return MD;
+}
+
+Instruction::InstListType::iterator
+Instruction::eraseFromParentWithUnsafe(bool UnsafeOK) {
+  if (UnsafeOK)
+    setMetadata(LLVMContext::MD_unsafe, nullptr);
+  return eraseFromParent();
+}
