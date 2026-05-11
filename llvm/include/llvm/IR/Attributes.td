@@ -369,6 +369,13 @@ def SwiftSelf : EnumAttr<"swiftself", IntersectPreserve, [ParamAttr]>;
 /// Argument is swift async context.
 def SwiftAsync : EnumAttr<"swiftasync", IntersectPreserve, [ParamAttr]>;
 
+/// SoundSpec: function body is speculation-unsafe in its entirety.
+/// Equivalent to tagging every instruction with `!unsafe` metadata, but
+/// expressed at the function level so the per-instruction metadata is
+/// unnecessary inside such functions. The inliner is responsible for
+/// translating between the two representations across inline boundaries.
+def Unsafe : EnumAttr<"unsafe", IntersectPreserve, [FnAttr]>;
+
 /// Function must be in a unwind table.
 def UWTable : IntAttr<"uwtable", IntersectPreserve, [FnAttr]>;
 
