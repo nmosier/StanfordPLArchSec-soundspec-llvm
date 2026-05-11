@@ -136,6 +136,7 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
                                   DomTreeUpdater *DTU) {
   Instruction *T = BB->getTerminator();
   IRBuilder<> Builder(T);
+  Builder.SetUnsafeMetadata(T->getMetadata(LLVMContext::MD_unsafe));
 
   // Branch - See if we are conditional jumping on constant
   if (auto *BI = dyn_cast<BranchInst>(T)) {
@@ -161,7 +162,7 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
                                 LLVMContext::MD_annotation});
 
       Value *Cond = BI->getCondition();
-      BI->eraseFromParent();
+      BI->eraseFromParentWithUnsafe();
       if (DeleteDeadConditions)
         RecursivelyDeleteTriviallyDeadInstructions(Cond, TLI);
       return true;
@@ -184,7 +185,7 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
       NewBI->copyMetadata(*BI, {LLVMContext::MD_loop, LLVMContext::MD_dbg,
                                 LLVMContext::MD_annotation});
 
-      BI->eraseFromParent();
+      BI->eraseFromParentWithUnsafe();
       if (DTU)
         DTU->applyUpdates({{DominatorTree::Delete, BB, OldDest}});
       return true;
@@ -603,7 +604,7 @@ void llvm::RecursivelyDeleteTriviallyDeadInstructions(
     if (MSSAU)
       MSSAU->removeMemoryAccess(I);
 
-    I->eraseFromParent();
+    I->eraseFromParentWithUnsafe();
   }
 }
 
@@ -2527,6 +2528,9 @@ unsigned llvm::changeToUnreachable(Instruction *I, bool PreserveLCSSA,
     if (DTU)
       UniqueSuccessors.insert(Successor);
   }
+  // [soundspec] I don't think we need to tag unreachable instructions with
+  // unsafe scopes, ever.
+  // Revisit this if I change my mind.
   auto *UI = new UnreachableInst(I->getContext(), I->getIterator());
   UI->setDebugLoc(I->getDebugLoc());
 
@@ -2536,7 +2540,7 @@ unsigned llvm::changeToUnreachable(Instruction *I, bool PreserveLCSSA,
   while (BBI != BBE) {
     if (!BBI->use_empty())
       BBI->replaceAllUsesWith(PoisonValue::get(BBI->getType()));
-    BBI++->eraseFromParent();
+    BBI++->eraseFromParentWithUnsafe();
     ++NumInstrsRemoved;
   }
   if (DTU) {
