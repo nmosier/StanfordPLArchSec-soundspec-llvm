@@ -6760,6 +6760,15 @@ Value *llvm::simplifyBinaryIntrinsic(Intrinsic::ID IID, Type *ReturnType,
                                      const CallBase *Call) {
   unsigned BitWidth = ReturnType->getScalarSizeInBits();
   switch (IID) {
+  case Intrinsic::unsafe_dep:
+    // SoundSpec: `llvm.unsafe.dep(value, dep_target)` records that
+    // `value` carries a SoundSpec-relevant dependency on `dep_target`.
+    // Since real dependencies only exist on `Argument`s / `Instruction`s,
+    // a constant `dep_target` is degenerate — collapse to the value.
+    if (isa<Constant>(Op1))
+      return Op0;
+    break;
+
   case Intrinsic::get_active_lane_mask: {
     if (match(Op1, m_Zero()))
       return ConstantInt::getFalse(ReturnType);
