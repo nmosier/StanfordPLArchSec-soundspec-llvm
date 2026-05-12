@@ -1099,6 +1099,13 @@ void Interpreter::visitVACopyInst(VACopyInst &I) {
 void Interpreter::visitIntrinsicInst(IntrinsicInst &I) {
   ExecutionContext &SF = ECStack.back();
 
+  // Handle threadlocal.address as identity -- the interpreter is
+  // single-threaded, so the thread-local address is just the global's address.
+  if (I.getIntrinsicID() == Intrinsic::threadlocal_address) {
+    SetValue(&I, getOperandValue(I.getArgOperand(0), SF), SF);
+    return;
+  }
+
   // If it is an unknown intrinsic function, use the intrinsic lowering
   // class to transform it into hopefully tasty LLVM code.
   //
