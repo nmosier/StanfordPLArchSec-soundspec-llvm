@@ -2130,6 +2130,32 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::MEMBARRIER:
         OutStreamer->emitRawComment("MEMBARRIER");
         break;
+      case TargetOpcode::UNSAFE_ENTER:
+      case TargetOpcode::UNSAFE_EXIT:
+      case TargetOpcode::UNSAFE_IN:
+      case TargetOpcode::UNSAFE_OUT:
+        // SoundSpec scope-region markers: purely meta. Stripped at
+        // AsmPrinter (emit nothing). For UNSAFE_IN/UNSAFE_OUT the
+        // `Constraints = "$src = $dst"` tie at the .td level means
+        // input and output share a physical register, so dropping
+        // them does not perturb register assignment.
+        if (isVerbose()) {
+          switch (MI.getOpcode()) {
+          case TargetOpcode::UNSAFE_ENTER:
+            OutStreamer->emitRawComment("UNSAFE_ENTER");
+            break;
+          case TargetOpcode::UNSAFE_EXIT:
+            OutStreamer->emitRawComment("UNSAFE_EXIT");
+            break;
+          case TargetOpcode::UNSAFE_IN:
+            OutStreamer->emitRawComment("UNSAFE_IN");
+            break;
+          case TargetOpcode::UNSAFE_OUT:
+            OutStreamer->emitRawComment("UNSAFE_OUT");
+            break;
+          }
+        }
+        break;
       case TargetOpcode::JUMP_TABLE_DEBUG_INFO:
         // This instruction is only used to note jump table debug info, it's
         // purely meta information.
