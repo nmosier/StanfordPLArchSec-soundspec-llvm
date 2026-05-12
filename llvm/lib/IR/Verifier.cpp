@@ -118,11 +118,13 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/PatternMatch.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -669,8 +671,10 @@ private:
   void verifyNoAliasScopeDecl();
 
   void verifyUnsafeScopes(const Function &F);
-  void verifyUnsafeScope(const Function &F, uint64_t UnsafeScopeID);
-
+  void verifyUnsafeScope(const Function &F, uint64_t ID);
+  void verifyUnsafeEnterExit(const Function &F, uint64_t UnsafeScopeID);
+  void verifyUnsafeInOut(const Function &F, uint64_t UnsafeScopeID);
+  void verifyUnsafeFunction(const Function &F);
 };
 
 } // end anonymous namespace
@@ -3042,6 +3046,9 @@ void Verifier::verifySiblingFuncletUnwinds() {
 void Verifier::visitFunction(const Function &F) {
   visitGlobalValue(F);
 
+  // [soundspec] Verify placement of llvm.unsafe.{enter,exit} intrinsics.
+  verifyUnsafeScopes(F);
+
   // Check function arguments.
   FunctionType *FT = F.getFunctionType();
   unsigned NumArgs = F.arg_size();
@@ -3373,9 +3380,6 @@ void Verifier::visitFunction(const Function &F) {
       if (BrokenDebugInfo)
         return;
     }
-
-  // [soundspec] Verify placement of llvm.unsafe.{enter,exit} intrinsics.
-  verifyUnsafeScopes(F);
 }
 
 // verifyBasicBlock - Verify that a basic block is well formed...
@@ -7755,7 +7759,55 @@ void Verifier::verifyNoAliasScopeDecl() {
   }
 }
 
+static bool isUnsafeEnterExitInOut(const Instruction &I) {
+  auto *II = dyn_cast<IntrinsicInst>(&I);
+  if (!II)
+    return false;
+  switch (II->getIntrinsicID()) {
+  default:
+    return false;
+  case Intrinsic::unsafe_enter:
+  case Intrinsic::unsafe_exit:
+  case Intrinsic::unsafe_in:
+  case Intrinsic::unsafe_out:
+    return true;
+  }
+}
+
+void Verifier::verifyUnsafeFunction(const Function &F) {
+  assert(F.hasFnAttribute(Attribute::Unsafe));
+
+  for (const Instruction &I : llvm::instructions(F)) {
+    // No !unsafe metadata is allowed, period.
+    Check(!I.getMetadata(LLVMContext::MD_unsafe),
+          "Instruction in unsafe function has !unsafe metadata", &I);
+
+    // No llvm.unsafe.{enter,exit,in,out} intrinsics are allowed.
+    Check(!isUnsafeEnterExitInOut(I), "Unsafe intrinsic in unsafe function", &I);
+  }
+}
+
 void Verifier::verifyUnsafeScopes(const Function &F) {
+  errs() << "[soundspec] verifying function " << F.getName() << "\n";
+
+  if (F.hasFnAttribute(Attribute::Unsafe)) {
+    verifyUnsafeFunction(F);
+    return;
+  }
+
+  // Is there unsafe metadata?
+  auto HasUnsafeMetadata = [](const Instruction &I) -> bool {
+    return I.getMetadata(LLVMContext::MD_unsafe) != nullptr;
+  };
+  if (llvm::any_of(llvm::instructions(F), HasUnsafeMetadata)) {
+    // There should be no unsafe intrinsics.
+    for (const Instruction &I : llvm::instructions(F)) {
+      Check(!isUnsafeEnterExitInOut(I),
+            "Unsafe intrinsic in function with !unsafe metadata", &I);
+    }
+    return;
+  }
+
   // Identify the unsafe scopes.
   SmallSet<uint64_t, 4> UnsafeScopeIDs;
   for (const Instruction &I : llvm::instructions(F))
@@ -7767,86 +7819,122 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
     verifyUnsafeScope(F, UnsafeScopeID);
 }
 
-void Verifier::verifyUnsafeScope(const Function &F, uint64_t UnsafeScopeID) {
-  // Do a BFS from the function entrypoint, aborting on any llvm.unsafe.exit(x)
-  // and stopping at any llvm.unsafe.enter(x).
-  SmallSet<const Instruction *, 4> Enters;
-  std::unordered_set<const Instruction *> Seen;
-  std::queue<const Instruction *> Todo;
-
-  auto AddSuccessors = [&Todo](const Instruction *I) {
-    if (const Instruction *Succ = I->getNextNode()) {
-      Todo.push(Succ);
-      return;
-    }
-    for (const BasicBlock *Succ : llvm::successors(I->getParent()))
-      Todo.push(&Succ->front());    
-  };
-
-  Todo.push(&F.getEntryBlock().front());
-  while (!Todo.empty()) {
-    const Instruction *I = Todo.front();
-    Todo.pop();
-
-    // If this is llvm.unsafe.enter(x), then mark it and skip.
-    if (isUnsafeScopeEnter(*I, UnsafeScopeID)) {
-      Enters.insert(I);
-      continue;
-    }
-
-    // If this is llvm.unsafe.exit(x), then the code is broken.
-    Check(!isUnsafeScopeExit(*I, UnsafeScopeID), "llvm.unsafe.exit reachable from function entry", I);
-
-    // If we've already seen this, skip.
-    if (!Seen.insert(I).second)
-      continue;
-
-    // Add successors.
-    AddSuccessors(I);
-  }
-
-  // Make sure that we have seen *all* instances of llvm.unsafe.enter(x).
-  for (const Instruction &I : llvm::instructions(F)) {
-    if (!isUnsafeScopeEnter(I, UnsafeScopeID))
-      continue;
-    Check(Enters.contains(&I), "llvm.unsafe.enter not reachable from function entry", &I);
-  }
-
-  // BFS from each llvm.unsafe.enter, ensuring that no function exit is
-  // reachable.
-  SmallSet<const Instruction *, 4> Exits;
-  for (const Instruction *Enter : Enters)
-    Todo.push(Enter);
-  while (!Todo.empty()) {
-    const Instruction *I = Todo.front();
-    Todo.pop();
-
-    // If this is llvm.unsafe.exit(x), then mark it and skip.
-    if (isUnsafeScopeExit(*I, UnsafeScopeID)) {
-      Exits.insert(I);
-      continue;
-    }
-
-    // If this is a return, then the function is broken.
-    Check(!isa<ReturnInst>(I), "return reachable from llvm.unsafe.enter", I);
-
-    // If we've already seen this, skip.
-    if (!Seen.insert(I).second)
-      continue;
-
-    // Add successors.
-    AddSuccessors(I);
-  }
-
-  // Make sure that we have seen *all* instances of llvm.unsafe.exit(x).
-  // NOTE: This might not be strictly necessary.
-  for (const Instruction &I : llvm::instructions(F)) {
-    if (!isUnsafeScopeExit(I, UnsafeScopeID))
-      continue;
-    Check(Exits.contains(&I), "llvm.unsafe.exit not reachable", &I);
-  }
+void Verifier::verifyUnsafeScope(const Function &F, uint64_t ID) {
+  verifyUnsafeEnterExit(F, ID);
+  verifyUnsafeInOut(F, ID);
 }
 
+void Verifier::verifyUnsafeEnterExit(const Function &F,
+                                     uint64_t ID) {
+  using namespace llvm::PatternMatch;
+  // TODO: We can simplify this by:
+  // (1) collecting the set of llvm.unsafe.enter(x) intrinsics,
+  // (2) starting the CFG traversal from there,
+  // (3) flag error if we ever re-visit an llvm.unsafe.enter(x).
+  // This could then possibly even be refactored to share code with
+  // verifyUnsafeInOut().
+  // TODO: This also shares code with UnsafeScopeAnalysis -- could refactor with that.
+
+  SmallVector<const Instruction *> Todo;
+  SmallSet<const Instruction *, 4> Seen;
+  for (const Instruction &I : llvm::instructions(F))
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_enter>(m_SpecificInt(ID))))
+      Todo.push_back(&I);
+  while (!Todo.empty()) {
+    const Instruction *I = Todo.pop_back_val();
+
+    // If we've seen this already, then skip.
+    if (!Seen.insert(I).second) {
+      // If this is an llvm.unsafe.enter, we're in trouble.
+      Check(!match(I, m_Intrinsic<Intrinsic::unsafe_enter>()),
+            "llvm.unsafe.enter re-visited", I);
+      continue;
+    }
+
+    // If this is llvm.unsafe.exit, then skip.
+    uint64_t ExitID;
+    if (match(I, m_Intrinsic<Intrinsic::unsafe_exit>(m_ConstantInt(ExitID)))) {
+      Check(ExitID == ID, "Improperly nested scope exit", I);
+      continue;
+    }
+
+    // If this a mismatched llvm.unsafe.enter, then skip.
+    uint64_t EnterID;
+    if (match(I,
+              m_Intrinsic<Intrinsic::unsafe_enter>(m_ConstantInt(EnterID)))) {
+      Check(EnterID == ID, "Improperly nested scope enter", I);
+    }
+
+    // If this is a return, error. All scopes should be closed before return.
+    Check(!isa<ReturnInst>(I), formatv("Return before llvm.unsafe.exit({})", ID), I);
+
+    // Add successors.
+    if (auto *Succ = I->getNextNode()) {
+      Todo.push_back(Succ);
+    } else {
+      for (auto *Succ : llvm::successors(I->getParent()))
+        Todo.push_back(&Succ->front());
+    }
+  }
+
+  // TODO: Should we also check for unreachable exits? Unreachable enters?
+  // Or maybe all unreachable llvm.unsafe.*?
+}
+
+void Verifier::verifyUnsafeInOut(const Function &F, uint64_t UnsafeScopeID) {
+  using namespace llvm::PatternMatch;
+
+  // TODO: Rewrite to use match().
+  SmallVector<const Instruction *> Todo;
+  SmallSet<const Instruction *, 8> Seen;
+  for (const Instruction &I : llvm::instructions(F)) {
+    if (!isUnsafeScopeIntr(I, UnsafeScopeID, Intrinsic::unsafe_in))
+      continue;
+    Todo.push_back(&I);
+  }
+
+  while (!Todo.empty()) {
+    const Instruction *I = Todo.pop_back_val();
+
+    // Skip repeats.
+    if (!Seen.insert(I).second) {
+      // We've already seen this instruction.
+      // It had better not be a revisited llvm.unsafe.in(x).
+      Check(!match(I, m_Intrinsic<Intrinsic::unsafe_in>()),
+            "Revisited llvm.unsafe.in", I);
+      continue;
+    }
+
+    // If this is llvm.unsafe.out(x), then skip.
+    uint64_t OutID;
+    if (match(I, m_Intrinsic<Intrinsic::unsafe_out>(m_Value(),
+                                                    m_ConstantInt(OutID)))) {
+      Check(OutID == UnsafeScopeID, "mismatched llvm.unsafe.out", I);
+      continue;
+    }
+
+    // If this is llvm.unsafe.in(y), broken.
+    uint64_t InID;
+    if (match(I, m_Intrinsic<Intrinsic::unsafe_in>(m_Value(),
+                                                   m_ConstantInt(InID))))
+      Check(InID == UnsafeScopeID,
+            "improperly nested llvm.unsafe.in", I);
+
+    // If this a return, then the function is broken.
+    Check(!isa<ReturnInst>(I), "llvm.unsafe.in reached return", I);
+
+    // Add data-flow successors.
+    for (const Use &U : I->uses())
+      Todo.push_back(cast<Instruction>(U.getUser()));
+  }
+
+  // Make sure we have seen *all* instances of llvm.unsafe.out(val, x).
+  for (const Instruction &I : llvm::instructions(F)) {
+    if (!isUnsafeScopeIntr(I, UnsafeScopeID, Intrinsic::unsafe_out))
+      continue;
+    Check(Seen.contains(&I), "Disconnected llvm.unsafe.out", &I);
+  }
+}
 //===----------------------------------------------------------------------===//
 //  Implement the public interfaces to this file...
 //===----------------------------------------------------------------------===//
