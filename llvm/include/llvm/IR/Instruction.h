@@ -1091,6 +1091,12 @@ public:
   /// \returns an iterator pointing to the element after the erased one
   LLVM_ABI InstListType::iterator eraseFromParentWithUnsafe(bool UnsafeOK = true);
 
+private:
+  bool CanDelete = true;
+
+public:
+  void setCanDelete() { CanDelete = true; }
+  bool canDelete() const { return CanDelete; }
 };
 
 inline void ilist_alloc_traits<Instruction>::deleteNode(Instruction *V) {
