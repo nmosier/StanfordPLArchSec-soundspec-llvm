@@ -1975,6 +1975,7 @@ bool llvm::canConstantFoldCallTo(const CallBase *Call, const Function *F) {
   // unsafe intrinsics.
   case Intrinsic::unsafe_in:
   case Intrinsic::unsafe_out:
+  case Intrinsic::unsafe_dep:
     return true;
   default:
     return false;
@@ -3275,7 +3276,12 @@ static Constant *ConstantFoldIntrinsicCall2(Intrinsic::ID IntrinsicID, Type *Ty,
   assert(Operands.size() == 2 && "Wrong number of operands.");
 
   if ((IntrinsicID == Intrinsic::unsafe_in ||
-       IntrinsicID == Intrinsic::unsafe_out)) {
+       IntrinsicID == Intrinsic::unsafe_out ||
+       IntrinsicID == Intrinsic::unsafe_dep)) {
+    // SoundSpec: all three intrinsics are identity passthroughs on their
+    // first argument when reachable here. For `unsafe.dep`, `Operands[1]`
+    // is always a constant by the precondition of `ConstantFoldIntrinsicCall2`,
+    // which already matches the "op2 is constant -> fold to op1" rule.
     return Operands[0];
   }
 
