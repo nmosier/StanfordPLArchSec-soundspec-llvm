@@ -2588,6 +2588,19 @@ void SelectionDAGISel::Select_MEMBARRIER(SDNode *N) {
                        N->getOperand(0));
 }
 
+void SelectionDAGISel::Select_UNSAFE_IN(SDNode *N) {
+  // SoundSpec: passthrough pseudo with tied `$src = $dst`. Operand 0 is the
+  // value, operand 1 is the TargetConstant scope id (already in immediate
+  // form thanks to `DAG.getTargetConstant` in the DAG builder).
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_IN, N->getValueType(0),
+                       {N->getOperand(0), N->getOperand(1)});
+}
+
+void SelectionDAGISel::Select_UNSAFE_OUT(SDNode *N) {
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_OUT, N->getValueType(0),
+                       {N->getOperand(0), N->getOperand(1)});
+}
+
 void SelectionDAGISel::Select_CONVERGENCECTRL_ANCHOR(SDNode *N) {
   CurDAG->SelectNodeTo(N, TargetOpcode::CONVERGENCECTRL_ANCHOR,
                        N->getValueType(0));
@@ -3326,6 +3339,8 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
   case ISD::LIFETIME_END:
   case ISD::PSEUDO_PROBE:
   case ISD::DEACTIVATION_SYMBOL:
+  case ISD::UNSAFE_ENTER:
+  case ISD::UNSAFE_EXIT:
     NodeToMatch->setNodeId(-1); // Mark selected.
     return;
   case ISD::AssertSext:
@@ -3363,6 +3378,12 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
     return;
   case ISD::MEMBARRIER:
     Select_MEMBARRIER(NodeToMatch);
+    return;
+  case ISD::UNSAFE_IN:
+    Select_UNSAFE_IN(NodeToMatch);
+    return;
+  case ISD::UNSAFE_OUT:
+    Select_UNSAFE_OUT(NodeToMatch);
     return;
   case ISD::STACKMAP:
     Select_STACKMAP(NodeToMatch);

@@ -337,6 +337,7 @@ private:
   SDValue PromoteIntRes_STRICT_FP_TO_FP16_BF16(SDNode *N);
   SDValue PromoteIntRes_XRINT(SDNode *N);
   SDValue PromoteIntRes_FREEZE(SDNode *N);
+  SDValue PromoteIntRes_UNSAFE_IN_OUT(SDNode *N);
   SDValue PromoteIntRes_INT_EXTEND(SDNode *N);
   SDValue PromoteIntRes_LOAD(LoadSDNode *N);
   SDValue PromoteIntRes_VP_LOAD(VPLoadSDNode *N);
@@ -1227,6 +1228,7 @@ private:
                              SDValue &Lo, SDValue &Hi);
   void SplitVecRes_AssertZext  (SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_ARITH_FENCE (SDNode *N, SDValue &Lo, SDValue &Hi);
+  void SplitRes_UNSAFE_IN_OUT(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_Select      (SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_SELECT_CC   (SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_UNDEF       (SDNode *N, SDValue &Lo, SDValue &Hi);

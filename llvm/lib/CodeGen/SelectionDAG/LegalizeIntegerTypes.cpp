@@ -334,6 +334,10 @@ void DAGTypeLegalizer::PromoteIntegerResult(SDNode *N, unsigned ResNo) {
   case ISD::FREEZE:
     Res = PromoteIntRes_FREEZE(N);
     break;
+  case ISD::UNSAFE_IN:
+  case ISD::UNSAFE_OUT:
+    Res = PromoteIntRes_UNSAFE_IN_OUT(N);
+    break;
 
   case ISD::ROTL:
   case ISD::ROTR:
@@ -641,6 +645,15 @@ SDValue DAGTypeLegalizer::PromoteIntRes_FREEZE(SDNode *N) {
   SDValue V = GetPromotedInteger(N->getOperand(0));
   return DAG.getNode(ISD::FREEZE, SDLoc(N),
                      V.getValueType(), V);
+}
+
+// SoundSpec passthrough markers: promote operand 0's type to a legal
+// integer, then rebuild the same opcode with the promoted operand. The
+// `i32 imm` scope id (operand 1) is preserved as-is.
+SDValue DAGTypeLegalizer::PromoteIntRes_UNSAFE_IN_OUT(SDNode *N) {
+  SDValue V = GetPromotedInteger(N->getOperand(0));
+  return DAG.getNode(N->getOpcode(), SDLoc(N), V.getValueType(), V,
+                     N->getOperand(1));
 }
 
 SDValue DAGTypeLegalizer::PromoteIntRes_BSWAP(SDNode *N) {
@@ -3046,6 +3059,8 @@ void DAGTypeLegalizer::ExpandIntegerResult(SDNode *N, unsigned ResNo) {
                        "operator!");
 
   case ISD::ARITH_FENCE:  SplitRes_ARITH_FENCE(N, Lo, Hi); break;
+  case ISD::UNSAFE_IN:
+  case ISD::UNSAFE_OUT:   SplitRes_UNSAFE_IN_OUT(N, Lo, Hi); break;
   case ISD::MERGE_VALUES: SplitRes_MERGE_VALUES(N, ResNo, Lo, Hi); break;
   case ISD::SELECT:       SplitRes_Select(N, Lo, Hi); break;
   case ISD::SELECT_CC:    SplitRes_SELECT_CC(N, Lo, Hi); break;

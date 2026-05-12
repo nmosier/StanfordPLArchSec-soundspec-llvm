@@ -1317,6 +1317,20 @@ EmitSpecialNode(SDNode *Node, bool IsClone, bool IsCloned,
     break;
   }
 
+  case ISD::UNSAFE_ENTER:
+  case ISD::UNSAFE_EXIT: {
+    // SoundSpec scope-boundary marker. Operand 0 is the input chain, operand
+    // 1 is a TargetConstant i32 scope id. The resulting MachineInstr has a
+    // single immediate operand (the scope id); no defs, no register uses.
+    unsigned TarOp = (Node->getOpcode() == ISD::UNSAFE_ENTER)
+                         ? TargetOpcode::UNSAFE_ENTER
+                         : TargetOpcode::UNSAFE_EXIT;
+    auto *Scope = cast<ConstantSDNode>(Node->getOperand(1));
+    BuildMI(*MBB, InsertPos, Node->getDebugLoc(), TII->get(TarOp))
+        .addImm(Scope->getZExtValue());
+    break;
+  }
+
   case ISD::PSEUDO_PROBE: {
     unsigned TarOp = TargetOpcode::PSEUDO_PROBE;
     auto Guid = cast<PseudoProbeSDNode>(Node)->getGuid();

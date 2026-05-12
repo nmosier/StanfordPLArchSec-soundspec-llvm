@@ -7049,6 +7049,37 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
                              getValue(I.getArgOperand(0)), Flags));
     return;
   }
+  case Intrinsic::unsafe_in:
+  case Intrinsic::unsafe_out: {
+    // SoundSpec: lower the passthrough markers to `ISD::UNSAFE_IN`/`OUT`.
+    // The scope id (arg 1) is an ImmArg, so we materialize it as a
+    // TargetConstant to keep it as an immediate operand on the resulting
+    // pseudo-instruction (no register allocation for it).
+    SDValue Val = getValue(I.getArgOperand(0));
+    auto *Scope = cast<ConstantInt>(I.getArgOperand(1));
+    SDValue ScopeOp =
+        DAG.getTargetConstant(Scope->getZExtValue(), sdl, MVT::i32);
+    unsigned Op = (Intrinsic == Intrinsic::unsafe_in) ? ISD::UNSAFE_IN
+                                                      : ISD::UNSAFE_OUT;
+    setValue(&I, DAG.getNode(Op, sdl, Val.getValueType(), Val, ScopeOp));
+    return;
+  }
+  case Intrinsic::unsafe_enter:
+  case Intrinsic::unsafe_exit: {
+    // SoundSpec: lower the scope-boundary markers to chain-carrying
+    // `ISD::UNSAFE_ENTER`/`EXIT` nodes. They have no value result, only a
+    // chain, so they appear in the side-effect chain and survive DCE.
+    auto *Scope = cast<ConstantInt>(I.getArgOperand(0));
+    SDValue ScopeOp =
+        DAG.getTargetConstant(Scope->getZExtValue(), sdl, MVT::i32);
+    unsigned Op = (Intrinsic == Intrinsic::unsafe_enter)
+                      ? ISD::UNSAFE_ENTER
+                      : ISD::UNSAFE_EXIT;
+    SDValue Node =
+        DAG.getNode(Op, sdl, MVT::Other, getRoot(), ScopeOp);
+    DAG.setRoot(Node);
+    return;
+  }
   case Intrinsic::fma:
     setValue(&I, DAG.getNode(
                      ISD::FMA, sdl, getValue(I.getArgOperand(0)).getValueType(),
