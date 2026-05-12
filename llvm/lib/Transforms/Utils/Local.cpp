@@ -1350,7 +1350,7 @@ bool llvm::TryToSimplifyUncondBranchFromEmptyBlock(BasicBlock *BB,
 
     // Clear the successor list of BB to match updates applying to DTU later.
     if (BB->getTerminator())
-      BB->back().eraseFromParent();
+      BB->back().eraseFromParentWithUnsafe();
 
     new UnreachableInst(BB->getContext(), BB);
     assert(succ_empty(BB) && "The successor list of BB isn't empty before "
@@ -3137,6 +3137,18 @@ void llvm::copyMetadataForLoad(LoadInst &Dest, const LoadInst &Source) {
       // All of these directly apply.
       Dest.setMetadata(ID, N);
       break;
+
+#if 0
+    // [soundspec]
+    case LLVMContext::MD_unsafe: {
+      // The new instruction shouldn't have a distinct scope.
+      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_unsafe);
+      (void) DestMD;
+      assert(!(DestMD && DestMD != N) && "Dest already has an unsafe scope!");
+      Dest.setMetadata(ID, N);
+      break;
+    }
+#endif
 
     case LLVMContext::MD_nonnull:
       copyNonnullMetadata(Source, N, Dest);
