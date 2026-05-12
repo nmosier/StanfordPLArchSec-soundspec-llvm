@@ -2720,6 +2720,52 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
     // Remember the first block that is newly cloned over.
     FirstNewBlock = LastBlock; ++FirstNewBlock;
 
+    // SoundSpec: translate `!unsafe` metadata across the inline boundary.
+    // Precedence (highest to lowest):
+    //   1. Caller has `unsafe` attribute  → strip `!unsafe` from every
+    //      newly-inlined instruction (the function-level attribute already
+    //      covers them).
+    //   2. Call site itself carried `!unsafe` MD → tag every newly-inlined
+    //      instruction with that MDNode (call-site absorption).
+    //   3. Callee has `unsafe` attribute  → tag every newly-inlined
+    //      instruction with the call-site's `!unsafe` MD if any (rule 2
+    //      shape) or with a fresh empty `!unsafe` MD allocated at the
+    //      call site otherwise (function-attribute → metadata conversion).
+    //   4. Otherwise: preserve whatever metadata each inlined instruction
+    //       already carried (existing behavior).
+    {
+      LLVMContext &Ctx = Caller->getContext();
+      bool CallerUnsafe = Caller->hasFnAttribute(Attribute::Unsafe);
+      MDNode *CallSiteUnsafeMD = CB.getMetadata(LLVMContext::MD_unsafe);
+      bool CalleeUnsafe = CalledFunc->hasFnAttribute(Attribute::Unsafe);
+
+      MDNode *PropagateMD = nullptr;
+      bool Strip = false;
+      if (CallerUnsafe) {
+        Strip = true;
+      } else if (CallSiteUnsafeMD) {
+        PropagateMD = CallSiteUnsafeMD;
+      } else if (CalleeUnsafe) {
+        // No call-site MD to reuse; allocate a fresh empty MDNode so this
+        // inlined region is its own scope. (Same trick rustc uses to
+        // defeat LLVM's empty-MDNode uniquing if needed: see codegen.)
+        PropagateMD = MDNode::getDistinct(Ctx, {});
+      }
+
+      if (Strip || PropagateMD) {
+        for (Function::iterator BB = FirstNewBlock, E = Caller->end(); BB != E;
+             ++BB) {
+          for (Instruction &I : *BB) {
+            if (Strip) {
+              I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+            } else {
+              I.setMetadata(LLVMContext::MD_unsafe, PropagateMD);
+            }
+          }
+        }
+      }
+    }
+
     // Insert retainRV/clainRV runtime calls.
     objcarc::ARCInstKind RVCallKind = objcarc::getAttachedARCFunctionKind(&CB);
     if (RVCallKind != objcarc::ARCInstKind::None)
@@ -2846,6 +2892,11 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
         for (Instruction &I : NewBlock)
           if (auto *II = dyn_cast<AssumeInst>(&I))
             IFI.GetAssumptionCache(*Caller).registerAssumption(II);
+
+    // Export the value map to the caller if requested.
+    if (IFI.VMap)
+      for (auto Entry : VMap)
+        IFI.VMap->insert({Entry.first, Entry.second});
   }
 
   if (IFI.ConvergenceControlToken) {
