@@ -45,6 +45,7 @@ add_llvm_component_library(LLVMCore
   IntrinsicInst.cpp
   LLVMContext.cpp
   LLVMContextImpl.cpp
+  UnsafeScope.cpp
   LLVMRemarkStreamer.cpp
   LegacyPassManager.cpp
   MDBuilder.cpp
