@@ -1435,6 +1435,16 @@ enum NodeType {
   LIFETIME_START,
   LIFETIME_END,
 
+  /// SoundSpec scope-region markers. Lowered from `llvm.unsafe.{enter,exit}`
+  /// (chain-carrying, no result value; operand 0 is the chain, operand 1 is
+  /// a TargetConstant i32 scope ID) and `llvm.unsafe.{in,out}` (passthrough
+  /// of the first operand; operand 0 is the value, operand 1 is a
+  /// TargetConstant i32 scope ID, result type matches operand 0).
+  UNSAFE_ENTER,
+  UNSAFE_EXIT,
+  UNSAFE_IN,
+  UNSAFE_OUT,
+
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for
   /// debugging purposes.
