@@ -604,9 +604,10 @@ void Function::stealArgumentListFrom(Function &Src) {
 }
 
 void Function::deleteBodyImpl(bool ShouldDrop) {
-  // Remove all !unsafe metadata.
+  // [soundspec] We're deleting the full function, so all instructions are
+  // safe to delete.
   for (Instruction &I : instructions(*this))
-    I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+    I.setCanDelete();
         
   setIsMaterializable(false);
 
