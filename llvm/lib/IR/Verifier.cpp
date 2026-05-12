@@ -105,6 +105,7 @@
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/VFABIDemangler.h"
@@ -121,6 +122,7 @@
 #include "llvm/Support/ModRef.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/IR/InstIterator.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -128,6 +130,8 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <unordered_set>
+#include <queue>
 
 using namespace llvm;
 
@@ -663,6 +667,10 @@ private:
 
   /// Verify the llvm.experimental.noalias.scope.decl declarations
   void verifyNoAliasScopeDecl();
+
+  void verifyUnsafeScopes(const Function &F);
+  void verifyUnsafeScope(const Function &F, uint64_t UnsafeScopeID);
+
 };
 
 } // end anonymous namespace
@@ -3365,6 +3373,9 @@ void Verifier::visitFunction(const Function &F) {
       if (BrokenDebugInfo)
         return;
     }
+
+  // [soundspec] Verify placement of llvm.unsafe.{enter,exit} intrinsics.
+  verifyUnsafeScopes(F);
 }
 
 // verifyBasicBlock - Verify that a basic block is well formed...
@@ -7741,6 +7752,98 @@ void Verifier::verifyNoAliasScopeDecl() {
                   "with the same scope",
                   I);
     ItCurrent = ItNext;
+  }
+}
+
+void Verifier::verifyUnsafeScopes(const Function &F) {
+  // Identify the unsafe scopes.
+  SmallSet<uint64_t, 4> UnsafeScopeIDs;
+  for (const Instruction &I : llvm::instructions(F))
+    if (auto UnsafeScopeID = getUnsafeScopeID(I))
+      UnsafeScopeIDs.insert(*UnsafeScopeID);
+
+  // Verify each unsafe scope.
+  for (uint64_t UnsafeScopeID : UnsafeScopeIDs)
+    verifyUnsafeScope(F, UnsafeScopeID);
+}
+
+void Verifier::verifyUnsafeScope(const Function &F, uint64_t UnsafeScopeID) {
+  // Do a BFS from the function entrypoint, aborting on any llvm.unsafe.exit(x)
+  // and stopping at any llvm.unsafe.enter(x).
+  SmallSet<const Instruction *, 4> Enters;
+  std::unordered_set<const Instruction *> Seen;
+  std::queue<const Instruction *> Todo;
+
+  auto AddSuccessors = [&Todo](const Instruction *I) {
+    if (const Instruction *Succ = I->getNextNode()) {
+      Todo.push(Succ);
+      return;
+    }
+    for (const BasicBlock *Succ : llvm::successors(I->getParent()))
+      Todo.push(&Succ->front());    
+  };
+
+  Todo.push(&F.getEntryBlock().front());
+  while (!Todo.empty()) {
+    const Instruction *I = Todo.front();
+    Todo.pop();
+
+    // If this is llvm.unsafe.enter(x), then mark it and skip.
+    if (isUnsafeScopeEnter(*I, UnsafeScopeID)) {
+      Enters.insert(I);
+      continue;
+    }
+
+    // If this is llvm.unsafe.exit(x), then the code is broken.
+    Check(!isUnsafeScopeExit(*I, UnsafeScopeID), "llvm.unsafe.exit reachable from function entry", I);
+
+    // If we've already seen this, skip.
+    if (!Seen.insert(I).second)
+      continue;
+
+    // Add successors.
+    AddSuccessors(I);
+  }
+
+  // Make sure that we have seen *all* instances of llvm.unsafe.enter(x).
+  for (const Instruction &I : llvm::instructions(F)) {
+    if (!isUnsafeScopeEnter(I, UnsafeScopeID))
+      continue;
+    Check(Enters.contains(&I), "llvm.unsafe.enter not reachable from function entry", &I);
+  }
+
+  // BFS from each llvm.unsafe.enter, ensuring that no function exit is
+  // reachable.
+  SmallSet<const Instruction *, 4> Exits;
+  for (const Instruction *Enter : Enters)
+    Todo.push(Enter);
+  while (!Todo.empty()) {
+    const Instruction *I = Todo.front();
+    Todo.pop();
+
+    // If this is llvm.unsafe.exit(x), then mark it and skip.
+    if (isUnsafeScopeExit(*I, UnsafeScopeID)) {
+      Exits.insert(I);
+      continue;
+    }
+
+    // If this is a return, then the function is broken.
+    Check(!isa<ReturnInst>(I), "return reachable from llvm.unsafe.enter", I);
+
+    // If we've already seen this, skip.
+    if (!Seen.insert(I).second)
+      continue;
+
+    // Add successors.
+    AddSuccessors(I);
+  }
+
+  // Make sure that we have seen *all* instances of llvm.unsafe.exit(x).
+  // NOTE: This might not be strictly necessary.
+  for (const Instruction &I : llvm::instructions(F)) {
+    if (!isUnsafeScopeExit(I, UnsafeScopeID))
+      continue;
+    Check(Exits.contains(&I), "llvm.unsafe.exit not reachable", &I);
   }
 }
 

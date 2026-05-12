@@ -1,13 +1,15 @@
 #ifndef LLVM_IR_UNSAFESCOPE_H
 #define LLVM_IR_UNSAFESCOPE_H
 
-#include "llvm/ADT/ScopeExit.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
-#include <functional>
+#include <optional>
 
 namespace llvm {
+
+class IntrinsicInst;
 
 class UnsafeBuilderScope {
   IRBuilderBase &Builder;
@@ -27,6 +29,7 @@ public:
 
 inline Instruction &removeUnsafeScope(Instruction &I) {
   I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+  return I;
 }
 
 inline Instruction *removeUnsafeScope(Instruction *I) {
@@ -56,6 +59,13 @@ inline MDNode *takeUnsafeScopeStashed(Instruction &I) {
 inline MDNode *getUnsafeScope(const Instruction &I) {
   return I.getMetadata(LLVMContext::MD_unsafe);
 }
+
+std::optional<uint64_t> getUnsafeScopeID(const MDNode *MD);
+std::optional<uint64_t> getUnsafeScopeID(const Instruction &I);
+
+bool isUnsafeScopeEnter(const Instruction &I);
+bool isUnsafeScopeEnter(const Instruction &I, uint64_t ID);
+bool isUnsafeScopeExit(const Instruction &I, uint64_t ID);
 
 }
 
