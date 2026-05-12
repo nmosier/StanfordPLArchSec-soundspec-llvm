@@ -1,310 +1,142 @@
 #include "llvm/Transforms/Utils/UnsafeScopeConversion.h"
 
+#include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/UnsafeScope.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Metadata.h"
 
 using namespace llvm;
 
-namespace {
-
-struct MyBasicBlockEdge {
-  BasicBlock *Src = nullptr;
-  BasicBlock *Dest = nullptr;
-
-  MyBasicBlockEdge(BasicBlock *Src, BasicBlock *Dest) : Src(Src), Dest(Dest) {}
-
-  BasicBlock *getStart() const { return Src; }
-  BasicBlock *getEnd() const { return Dest; }
-};
-
-}
-
-static void collectScopeEnters(Function &F, int64_t Scope,
-                               SmallVectorImpl<MyBasicBlockEdge> &BlockEdges,
-                               SmallVectorImpl<Instruction *> &InstEdges) {
-  SmallVector<Instruction *> Todo;
-  SmallSet<Instruction *, 4> Seen;
-  Todo.push_back(&F.getEntryBlock().front());
-  while (!Todo.empty()) {
-    Instruction *I = Todo.pop_back_val();
-
-    // If we found unsafe metadata, stop.
-    if (auto ID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe));
-        ID && *ID == Scope)
-      continue;
-
-    // Skip if already seen.
-    if (!Seen.insert(I).second)
-      continue;
-
-    // Add successors.
-    if (auto *Succ = I->getNextNode()) {
-      Todo.push_back(Succ);
-    } else {
-      for (auto *Succ : llvm::successors(I->getParent()))
-        Todo.push_back(&Succ->front());
-    }
-  }
-
-  for (Instruction *I : Seen) {
-    // Intra-block.
-    if (Instruction *Succ = I->getNextNode()) {
-      if (!Seen.contains(Succ))
-        InstEdges.push_back(I);
-      continue;
-    }
-
-    // Inter-block.
-    for (BasicBlock *Succ : llvm::successors(I->getParent())) {
-      if (!Seen.contains(&Succ->front()))
-        BlockEdges.emplace_back(I->getParent(), Succ);
-    }
-  }
-}
-
-static void collectScopeExits(Function &F, int64_t Scope,
-                              SmallVectorImpl<MyBasicBlockEdge> &BlockEdges,
-                              SmallVectorImpl<Instruction *> &InstEdges) {
-  SmallVector<Instruction *> Todo;
-  SmallSet<Instruction *, 4> Seen;
-  for (Instruction &I : llvm::instructions(F))
-    if (isa<ReturnInst>(&I))
-      Todo.push_back(&I);
-  while (!Todo.empty()) {
-    Instruction *I = Todo.pop_back_val();
-
-    // If the instruction has the scope, stop exploring.
-    if (getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe)) == Scope)
-      continue;
-
-    // Skip if already seen.
-    if (!Seen.insert(I).second)
-      continue;
-
-    // Add successors.
-    if (Instruction *Pred = I->getPrevNode()) {
-      Todo.push_back(Pred);
-      continue;
-    }
-    for (BasicBlock *Pred : llvm::predecessors(I->getParent()))
-      Todo.push_back(&Pred->back());
-  }
-
-  for (Instruction *I : Seen) {
-    // Intra-block.
-    if (Instruction *Pred = I->getPrevNode()) {
-      if (!Seen.contains(Pred))
-        InstEdges.push_back(Pred);
-      continue;
-    }
-
-    // Inter-block.
-    for (BasicBlock *Pred : llvm::predecessors(I->getParent()))
-      if (!Seen.contains(&Pred->back()))
-        BlockEdges.emplace_back(Pred, I->getParent());
-  }
-}
-
-template <typename Func>
-static void insertEnterExitIntrinsicAlongBlockEdges(
-    Function &F, ArrayRef<MyBasicBlockEdge> Edges, Func CreateIntrinsic) {
-  IRBuilder<> IRB(F.getContext());
-  for (MyBasicBlockEdge Edge : Edges) {
-    BasicBlock *InsBB = Edge.Dest;
-
-    // If the destination has multiple predecessors,
-    // then split the edge.
-    if (llvm::pred_size(Edge.Dest) > 1) {
-      InsBB = SplitEdge(Edge.Src, Edge.Dest);
-      assert(InsBB && "Failed to split edge!");
-    }
-
-    // Set the insertion point.
-    IRB.SetInsertPoint(InsBB, InsBB->getFirstNonPHIOrDbgOrLifetime());
-
-    // Insert the intrinsic.
-    CreateIntrinsic(IRB);
-  }
-}
-
-template <typename Func>
-static void insertEnterExitIntrinsicAlongInstEdges(
-    Function &F, ArrayRef<Instruction *> Edges, Func CreateIntrinsic) {
-  for (Instruction *Src : Edges) {
-    Instruction *Dest = Src->getNextNode();
-    assert(Dest);
-    IRBuilder<> IRB(Dest);
-    CreateIntrinsic(IRB);
-  }
-}
-
-template <typename Func>
-static void insertUnsafeEnterExitIntrinsicsForUnsafeScope(
-    Function &F, int64_t Scope, Func Collect, Intrinsic::ID Intrin) {
-  SmallVector<MyBasicBlockEdge> BlockEdges;
-  SmallVector < Instruction *> InstEdges;
-  Collect(F, Scope, BlockEdges, InstEdges);
-  auto CreateIntrinsic = [&](IRBuilder<> &IRB) {
-    IRB.CreateIntrinsic(Intrin, {IRB.getInt32(Scope)});
-  };
-  insertEnterExitIntrinsicAlongBlockEdges(F, BlockEdges, CreateIntrinsic);
-  insertEnterExitIntrinsicAlongInstEdges(F, InstEdges, CreateIntrinsic);
-}
-
-[[nodiscard]] static auto getControlBoundedScope(Function &F, uint64_t Scope) {
+static void maybeInsertUnsafeIn(Function &F, uint64_t ID,
+                                const SmallSet<Instruction *, 4> &Insts,
+                                Use &SrcU, Instruction *DestI) {
   using namespace llvm::PatternMatch;
 
-  SmallSet<Instruction *, 4> Seen;
-  SmallVector<Instruction *> Todo;
-  for (Instruction &I : llvm::instructions(F))
-    if (match(&I, m_Intrinsic<Intrinsic::unsafe_enter>(m_SpecificInt(Scope))))
-      Todo.push_back(&I);
-  while (!Todo.empty()) {
-    Instruction *I = Todo.pop_back_val();
-
-    // Skip if seen.
-    if (!Seen.insert(I).second)
-      continue;
-
-    // Stop if llvm.unsafe.exit(x).
-    if (match(I, m_Intrinsic<Intrinsic::unsafe_exit>(m_SpecificInt(Scope))))
-      continue;
-
-    // Add successors.
-    insertSuccessors(I, std::back_inserter(Todo));
-  }
-  return Seen;
-}
-
-
-static void insertUnsafeEnterExitIntrinsics(Function &F, uint64_t Scope) {
-  insertUnsafeEnterExitIntrinsicsForUnsafeScope(F, Scope, &collectScopeEnters,
-                                                Intrinsic::unsafe_enter);
-  insertUnsafeEnterExitIntrinsicsForUnsafeScope(F, Scope, &collectScopeExits,
-                                                Intrinsic::unsafe_exit);
-}
-
-static void insertUnsafeInOut(Use &Src, Instruction *Dest,
-                                std::optional<uint64_t> SrcID,
-                                std::optional<uint64_t> DestID) {
-  Value *V = Src;
-  IRBuilder<> IRB(Dest);
-
-  // Handle PHI nodes specially.
-  if (PHINode *Phi = dyn_cast<PHINode>(&Dest)) {
-    BasicBlock *Pred = Phi->getIncomingBlock(Src);
-    if (llvm::succ_size(Pred) > 1) {
-      Pred = SplitEdge(Phi->getIncomingBlock(Src), Dest->getParent());
-      assert(Pred && "Failed to split edge!");
-    }
-    IRB.SetInsertPoint(Pred->getTerminator());
-  }
-
-  if (SrcID) {
-    V = IRB.CreateBinaryIntrinsic(Intrinsic::unsafe_out, V,
-                                  IRB.getInt32(*SrcID));
-  }
-
-  if (DestID) {
-    V = IRB.CreateBinaryIntrinsic(Intrinsic::unsafe_in, V,
-                                  IRB.getInt32(*DestID));
-  }
-
-  Src.set(V);
-}
-
-template <typename Range>
-static void insertUnsafeInOutIntrinsic(Instruction &Dest, uint64_t Scope,
-                                       const Range &ScopeInsts) {
-  // Skip assume-like intrinsics, since they're not real code.
-  if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(&Dest);
-      II && II->isAssumeLikeIntrinsic())
+  // Already have llvm.unsafe.in.
+  if (match(DestI, m_Intrinsic<Intrinsic::unsafe_in>()))
     return;
 
-  std::optional<uint64_t> DestID;
-  if (ScopeInsts.contains(&Dest))
-    DestID = Scope;
-  for (Use &SrcU : Dest.operands()) {
-    Value *Src = SrcU.get();
-    std::optional<uint64_t> SrcID;
-    if (auto *SrcI = dyn_cast<Instruction>(Src); SrcI && ScopeInsts.contains(SrcI))
-      SrcID = Scope;
+  // Producer is inside the unsafe scope.
+  if (auto *SrcI = dyn_cast<Instruction>(SrcU.get());
+      SrcI && Insts.contains(SrcI))
+    return;
 
-    // If the source and destination scopes are identical, nothing to insert.
-    if (SrcID == DestID)
-      continue;
-
-    insertUnsafeInOut(SrcU, &Dest, SrcID, DestID);
+  PHINode *DestPhi = dyn_cast<PHINode>(DestI);
+  Instruction *InsertBeforeInst = DestI;
+  if (DestPhi) {
+    auto *B = DestPhi->getIncomingBlock(SrcU);
+    if (llvm::succ_size(B) > 1) {
+      B = SplitEdge(B, DestI->getParent());
+      assert(B);
+    }
+    InsertBeforeInst = B->getTerminator();
   }
+
+  // Insert llvm.unsafe.in.
+  IRBuilder<> IRB(InsertBeforeInst);
+  Value *V = IRB.CreateBinaryIntrinsic(Intrinsic::unsafe_in, SrcU.get(),
+                                       IRB.getInt32(ID));
+  SrcU.set(V);
 }
 
-template <typename Range>
-static void insertUnsafeInOutIntrinsics(Function &F, uint64_t Scope,
-                                       const Range &ScopeInsts) {
-  for (Instruction &I : llvm::make_early_inc_range(llvm::instructions(F))) {
-    insertUnsafeInOutIntrinsic(I, Scope, ScopeInsts);
-  }
+static void maybeInsertUnsafeOut(Function &F, uint64_t ID,
+                                 const SmallSet<Instruction *, 4> &Insts,
+                                 Use &DestU, Instruction *SrcI) {
+  using namespace llvm::PatternMatch;
+
+  // Already have llvm.unsafe.out.
+  if (match(SrcI, m_Intrinsic<Intrinsic::unsafe_out>()))
+    return;
+
+  // Consumer is inside the unsafe scope.
+  if (Insts.contains(cast<Instruction>(DestU.get())))
+    return;
+
+  // Insert llvm.unsafe.out.
+  Instruction *InsertAfterInst = SrcI;
+  if (isa<PHINode>(SrcI))
+    InsertAfterInst = &*SrcI->getParent()->getFirstInsertionPt();
+
+  IRBuilder<> IRB(InsertAfterInst->getNextNode());
+  auto *V =
+      IRB.CreateBinaryIntrinsic(Intrinsic::unsafe_out, SrcI, IRB.getInt32(ID));
+  DestU.set(V);
 }
 
-void llvm::convertUnsafeMetadataToIntrinsics(Function &F) {
-  // No llvm.unsafe.* intrinsics should be present currently.
-  for (Instruction &I : llvm::instructions(F)) {
-    auto *II = dyn_cast<IntrinsicInst>(&I);
-    if (!II)
-      continue;
-    switch (II->getIntrinsicID()) {
-    case Intrinsic::unsafe_enter:
-    case Intrinsic::unsafe_exit:
-    case Intrinsic::unsafe_in:
-    case Intrinsic::unsafe_out:
-      report_fatal_error("found unsafe intrinsic!");
+void llvm::repairUnsafeScope(Function &F, uint64_t ID,
+                             const SmallSet<Instruction *, 4> &Insts) {
+  using namespace llvm::PatternMatch;
+
+  // Given the scope defined by the set of instructions, insert
+  // necessary metadata and llvm.unsafe.in/out.
+
+  LLVMContext &Ctx = F.getContext();
+  IRBuilder<> IRB(Ctx);
+
+  // Some sanity checks
+  for (Instruction *I : Insts) {
+    // Shouldn't have metadata for another scope.
+    if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe)))
+      assert(MyID == ID);
+
+    // Shouldn't have llvm.unsafe.in/out for another scope.
+    uint64_t MyID;
+    if (match(I, m_Intrinsic<Intrinsic::unsafe_in>(m_Value(),
+                                                   m_ConstantInt(MyID))) ||
+        match(I, m_Intrinsic<Intrinsic::unsafe_out>(m_Value(),
+                                                    m_ConstantInt(MyID))))
+      assert(MyID == ID);
+  }
+
+  // First, mark all loads, stores, calls, and branches with metadata.
+  auto *MD = MDTuple::get(Ctx, {ConstantAsMetadata::get(IRB.getInt32(ID))});
+  for (Instruction *I : Insts) {
+    if (isa<CallBase, LoadInst, StoreInst, BranchInst>(I)) {
+      [[maybe_unused]] auto *OldMD = I->getMetadata(LLVMContext::MD_unsafe);
+      assert(OldMD == nullptr || OldMD == MD);
+      I->setMetadata(LLVMContext::MD_unsafe, MD);
     }
   }
 
-  // Collect all scopes.
-  SmallSet<uint64_t, 4> Scopes;
-  for (Instruction &I : llvm::instructions(F))
-    if (auto Scope = getUnsafeScopeID(I.getMetadata(LLVMContext::MD_unsafe)))
-      Scopes.insert(*Scope);
-
-  // Transform each scope.
-  for (auto Scope : Scopes) {
-    insertUnsafeEnterExitIntrinsics(F, Scope);
-    auto ScopeInsts = getControlBoundedScope(F, Scope);
-    insertUnsafeInOutIntrinsics(F, Scope, ScopeInsts);
+  // Mark any register data-flow edges with llvm.unsafe.in/out.
+  for (Instruction *I : Insts) {
+    for (Use &SrcU : I->operands())
+      maybeInsertUnsafeIn(F, ID, Insts, SrcU, I);
+    for (Use &DestU : I->uses())
+      maybeInsertUnsafeOut(F, ID, Insts, DestU, I);
   }
-
-  // Remove metadata.
-  for (Instruction &I : llvm::instructions(F))
-    I.setMetadata(LLVMContext::MD_unsafe, nullptr);
 }
 
-void llvm::addMissingUnsafeInOutIntrinsics(Function &F) {
+void llvm::repairUnsafeScopes(Function &F) {
   using namespace llvm::PatternMatch;
-  SmallSet<uint64_t, 4> Scopes;
+
+  SmallSet<uint64_t, 4> IDs;
   for (Instruction &I : llvm::instructions(F)) {
     uint64_t ID;
-    if (match(&I, m_Intrinsic<Intrinsic::unsafe_enter>(m_ConstantInt(ID))))
-      Scopes.insert(ID);
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_in>(m_Value(),
+                                                    m_ConstantInt(ID))) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_out>(m_Value(),
+                                                     m_ConstantInt(ID)))) {
+      IDs.insert(ID);
+    }
+    if (auto *MD = I.getMetadata(LLVMContext::MD_unsafe))
+      IDs.insert(*getUnsafeScopeID(MD));
   }
 
-  // For each scope, fill in missing intrinsics.
-  for (auto ID : Scopes) {
-    // Collect instructions in the scope.
-    auto Scope = getControlBoundedScope(F, ID);
-    for (Instruction *Dest : Scope) {
-      for (Use &Src : Dest->operands()) {
-        
-      }
-    }
+  for (auto ID : IDs) {
+    auto Insts = getUnsafeScopeInsts(F, ID);
+    repairUnsafeScope(F, ID, Insts);
   }
 }

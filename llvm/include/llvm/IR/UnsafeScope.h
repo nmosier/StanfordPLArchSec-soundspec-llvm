@@ -1,10 +1,12 @@
 #ifndef LLVM_IR_UNSAFESCOPE_H
 #define LLVM_IR_UNSAFESCOPE_H
 
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/ADT/SmallSet.h"
 #include <optional>
 
 namespace llvm {
@@ -81,6 +83,7 @@ bool isUnsafeScopeIntr(const Instruction &I, ArrayRef<Intrinsic::ID> IIDs);
 
 // TODO: Deprecate most of this in favor of match().
 
+// TODO: Remove.
 template <typename OutputIt>
 OutputIt insertSuccessors(Instruction *I, OutputIt out) {
   if (Instruction *Succ = I->getNextNode()) {
@@ -92,6 +95,19 @@ OutputIt insertSuccessors(Instruction *I, OutputIt out) {
   return out;
 }
 
+template <typename OutputIt>
+OutputIt insertPredecessors(Instruction *I, OutputIt Out) {
+  if (Instruction *Pred = I->getPrevNode()) {
+    *Out++ = Pred;
+  } else {
+    for (auto *Pred : llvm::predecessors(I->getParent()))
+      *Out++ = &Pred->back();
+  }
+  return Out;
 }
+
+SmallSet<Instruction *, 4> getUnsafeScopeInsts(Function &F, uint64_t ID);
+
+} // namespace llvm
 
 #endif

@@ -1,12 +1,30 @@
 #include "llvm/IR/UnsafeScope.h"
 
-#include "llvm-c/Types.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/ADT/SmallSet.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/PatternMatch.h"
 
 using namespace llvm;
+
+namespace {
+
+struct MyBasicBlockEdge {
+  BasicBlock *Src = nullptr;
+  BasicBlock *Dest = nullptr;
+
+  MyBasicBlockEdge(BasicBlock *Src, BasicBlock *Dest) : Src(Src), Dest(Dest) {}
+
+  BasicBlock *getStart() const { return Src; }
+  BasicBlock *getEnd() const { return Dest; }
+};
+
+}
 
 /// Decode the `i32` scope ID stored as the single operand of an
 /// `!unsafe !N = !{i32 ID}` MDNode (created in
@@ -109,4 +127,137 @@ bool llvm::isUnsafeScopeIntr(const Instruction &I,
   if (!II)
     return false;
   return llvm::is_contained(IIDs, II->getIntrinsicID());
+}
+
+static void appendSuccessors(Instruction *I,
+                            SmallVectorImpl<Instruction *> &Out) {
+  if (Instruction *Succ = I->getNextNode()) {
+    Out.push_back(Succ);
+  } else {
+    for (auto *Succ : llvm::successors(I->getParent()))
+      Out.push_back(&Succ->front());
+  }
+}
+
+static void appendPredecessors(Instruction *I,
+                               SmallVectorImpl<Instruction *> &Out) {
+  if (Instruction *Pred = I->getPrevNode()) {
+    Out.push_back(Pred);
+  } else {
+    for (auto *Pred : llvm::predecessors(I->getParent()))
+      Out.push_back(&Pred->back());
+  }
+}
+
+static auto computeControlScope(Function &F, uint64_t ID) {
+  SmallVector<Instruction *> Todo;
+  SmallSet<Instruction *, 4> Seen;
+
+  auto dfs = [&](auto AddNext) {
+    while (!Todo.empty()) {
+      auto *I = Todo.pop_back_val();
+
+      // If this has !unsafe metadata, skip.
+      if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe));
+          MyID == ID)
+        continue;
+
+      // If we've seen it already, skip.
+      if (!Seen.insert(I).second)
+        continue;
+
+      // Add successors/predecessors.
+      AddNext(I, Todo);
+    }
+  };
+
+  // Forward pass.
+  Todo.push_back(&F.getEntryBlock().front());
+  dfs(appendSuccessors);
+
+  // Backward pass.
+  for (Instruction &I : llvm::instructions(F))
+    if (isa<ReturnInst>(&I))
+      Todo.push_back(&I);
+  dfs(appendPredecessors);
+
+  // Compute the instructions in the scope.
+  SmallSet<Instruction *, 4> Insts;
+  for (Instruction &I : llvm::instructions(F))
+    if (!Seen.contains(&I))
+      Insts.insert(&I);
+  return Insts;
+}
+
+static auto computeDataScope(Function &F, uint64_t ID) {
+  using namespace llvm::PatternMatch;
+
+  SmallVector<Instruction *> Todo;
+  SmallSet<Instruction *, 4> Seen;
+
+  // Forward.
+  for (Instruction &I : llvm::instructions(F))
+    if (match(&I,
+              m_Intrinsic<Intrinsic::unsafe_in>(m_Value(), m_SpecificInt(ID))))
+      Todo.push_back(&I);
+  while (!Todo.empty()) {
+    auto *I = Todo.pop_back_val();
+
+    // If this has !unsafe metadata, skip.
+    if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe));
+        MyID == ID)
+      continue;
+
+    // If we've seen it already, skip.
+    if (!Seen.insert(I).second)
+      continue;
+
+    // If this is llvm.unsafe.out, we're done.
+    if (match(I,
+              m_Intrinsic<Intrinsic::unsafe_out>(m_Value(), m_SpecificInt(ID))))
+      continue;
+
+    // Add consumers.
+    for (User *U : I->users())
+      Todo.push_back(cast<Instruction>(U));
+  }
+
+  // Backward.
+  for (Instruction &I : llvm::instructions(F))
+    if (match(&I,
+              m_Intrinsic<Intrinsic::unsafe_out>(m_Value(), m_SpecificInt(ID))))
+      Todo.push_back(&I);
+  while (!Todo.empty()) {
+    auto *I = Todo.pop_back_val();
+
+    // If this has !unsafe metadata, skip.
+    if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe));
+        MyID == ID)
+      continue;
+
+    // If we've seen it already, skip.
+    if (!Seen.insert(I).second)
+      continue;
+
+    // If this is llvm.unsafe.in, we're done.
+    if (match(I,
+              m_Intrinsic<Intrinsic::unsafe_in>(m_Value(), m_SpecificInt(ID))))
+      continue;
+
+    // Add producers.
+    for (Value *V : I->operands())
+      if (auto *I = dyn_cast<Instruction>(V))
+        Todo.push_back(I);
+  }
+
+  return Seen;
+}
+
+SmallSet<Instruction *, 4> llvm::getUnsafeScopeInsts(Function &F, uint64_t ID) {
+  auto ControlScope = computeControlScope(F, ID);
+  auto DataScope = computeDataScope(F, ID);
+  SmallSet<Instruction *, 4> Result;
+  llvm::copy(ControlScope, std::inserter(Result, Result.end()));
+  llvm::copy(DataScope, std::inserter(Result, Result.end()));
+  return Result;
 }
