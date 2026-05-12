@@ -63,9 +63,34 @@ inline MDNode *getUnsafeScope(const Instruction &I) {
 std::optional<uint64_t> getUnsafeScopeID(const MDNode *MD);
 std::optional<uint64_t> getUnsafeScopeID(const Instruction &I);
 
-bool isUnsafeScopeEnter(const Instruction &I);
+// TODO: Remove these in favor of `isUnsafeScopeIntr`?
+bool isUnsafeScopeEnter(const Instruction &I, uint64_t *ID = nullptr);
 bool isUnsafeScopeEnter(const Instruction &I, uint64_t ID);
+bool isUnsafeScopeExit(const Instruction &I, uint64_t *ID = nullptr);
 bool isUnsafeScopeExit(const Instruction &I, uint64_t ID);
+bool isUnsafeScopeEnterOrExit(const Instruction &I, uint64_t *ID = nullptr);
+
+bool isUnsafeScopeIn(const Instruction &I, uint64_t *ID = nullptr);
+bool isUnsafeScopeOut(const Instruction &I, uint64_t *ID = nullptr);
+
+// TODO: Should reorder 2nd and 3rd arguments.
+bool isUnsafeScopeIntr(const Instruction &I, uint64_t UnsafeScopeID,
+                       Intrinsic::ID IID);
+bool isUnsafeScopeIntr(const Instruction &I, uint64_t *ID, Intrinsic::ID IID);
+bool isUnsafeScopeIntr(const Instruction &I, ArrayRef<Intrinsic::ID> IIDs);
+
+// TODO: Deprecate most of this in favor of match().
+
+template <typename OutputIt>
+OutputIt insertSuccessors(Instruction *I, OutputIt out) {
+  if (Instruction *Succ = I->getNextNode()) {
+    *out++ = Succ;
+  } else {
+    for (auto *Succ : llvm::successors(I->getParent()))
+      *out++ = &Succ->front();
+  }
+  return out;
+}
 
 }
 
