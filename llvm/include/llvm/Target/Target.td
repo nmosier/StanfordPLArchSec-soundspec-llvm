@@ -1395,6 +1395,46 @@ def ARITH_FENCE : StandardPseudoInstruction {
   let isMeta = true;
 }
 
+// SoundSpec scope-region markers (target-independent meta-pseudos).
+//
+// UNSAFE_ENTER/UNSAFE_EXIT: scope-boundary markers. `hasSideEffects = true`
+// keeps them from being DCE'd; `isMeta = true` strips them at AsmPrinter.
+def UNSAFE_ENTER : StandardPseudoInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins i32imm:$scope);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let isMeta = true;
+}
+def UNSAFE_EXIT : StandardPseudoInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins i32imm:$scope);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let isMeta = true;
+}
+
+// UNSAFE_IN/UNSAFE_OUT: identity passthrough modelled on `ARITH_FENCE`. The
+// `Constraints = "$src = $dst"` tie forces regalloc to assign the same
+// physical register to input and output, so AsmPrinter dropping these
+// instructions does not perturb register assignment.
+def UNSAFE_IN : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src, i32imm:$scope);
+  let AsmString = "";
+  let hasSideEffects = false;
+  let Constraints = "$src = $dst";
+  let isMeta = true;
+}
+def UNSAFE_OUT : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src, i32imm:$scope);
+  let AsmString = "";
+  let hasSideEffects = false;
+  let Constraints = "$src = $dst";
+  let isMeta = true;
+}
+
 def STACKMAP : StandardPseudoInstruction {
   let OutOperandList = (outs);
   let InOperandList = (ins i64imm:$id, i32imm:$nbytes, variable_ops);
