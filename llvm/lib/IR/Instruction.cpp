@@ -60,24 +60,11 @@ Instruction::Instruction(Type *ty, unsigned it, AllocInfo AllocInfo,
   }
 }
 
-static bool checkDeleteUnsafeInstruction(const Instruction &I) {
-  if (!I.getMetadata(LLVMContext::MD_unsafe))
-    return true;
-
-  if (auto *Branch = dyn_cast<BranchInst>(&I);
-      Branch && Branch->isUnconditional())
-    return true;
-
-  return false;
-}
-
 Instruction::~Instruction() {
   assert(!getParent() && "Instruction still linked in the program!");
 
-  // Abort if this has !unsafe metadata.
-  if (!checkDeleteUnsafeInstruction(*this)) {
-    errs() << "[soundspec] internal error: tried to delete instruction with "
-              "unsafe metadata: "
+  if (!CanDelete) {
+    errs() << "[soundspec] internal error: deleting unhandled instruction: "
            << *this << "\n";
     std::abort();
   }
@@ -1442,7 +1429,6 @@ MDNode *Instruction::takeMetadata(StringRef Kind) {
 
 Instruction::InstListType::iterator
 Instruction::eraseFromParentWithUnsafe(bool UnsafeOK) {
-  if (UnsafeOK)
-    setMetadata(LLVMContext::MD_unsafe, nullptr);
+  CanDelete |= UnsafeOK;
   return eraseFromParent();
 }
