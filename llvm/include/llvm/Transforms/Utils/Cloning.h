@@ -282,6 +282,11 @@ public:
   Value *ConvergenceControlToken = nullptr;
   Instruction *CallSiteEHPad = nullptr;
 
+  /// If non-null, InlineFunction will populate this with a mapping from
+  /// values in the callee (instructions, arguments, etc.) to the corresponding
+  /// values in the inlined copy in the caller.
+  ValueToValueMapTy *VMap = nullptr;
+
   /// Update profile for callee as well as cloned version. We need to do this
   /// for regular inlining, but not for inlining from sample profile loader.
   bool UpdateProfile;
