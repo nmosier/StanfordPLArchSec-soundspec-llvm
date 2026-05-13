@@ -7795,18 +7795,31 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
     return;
   }
 
-  // Is there unsafe metadata?
-  auto HasUnsafeMetadata = [](const Instruction &I) -> bool {
-    return I.getMetadata(LLVMContext::MD_unsafe) != nullptr;
-  };
-  if (llvm::any_of(llvm::instructions(F), HasUnsafeMetadata)) {
-    // There should be no unsafe intrinsics.
-    for (const Instruction &I : llvm::instructions(F)) {
-      Check(!isUnsafeEnterExitInOut(I),
-            "Unsafe intrinsic in function with !unsafe metadata", &I);
+  for (const Instruction &I : llvm::instructions(F)) {
+    auto *II = dyn_cast<IntrinsicInst>(&I);
+
+    // Don't allow llvm.unsafe.enter, llvm.unsafe.exit, or llvm.unsafe.dep for
+    // now.
+    if (II) {
+      switch (II->getIntrinsicID()) {
+      case Intrinsic::unsafe_enter:
+      case Intrinsic::unsafe_exit:
+      case Intrinsic::unsafe_dep:
+        Check(false, "llvm.unsafe.enter/exit/dep", &I);
+        break;
+      }
     }
-    return;
-  }
+
+    // !unsafe metadata shouldn't be on some types of instructions.
+    if (I.getMetadata(LLVMContext::MD_unsafe)) {
+#if 0
+      Check(!II || !II->isAssumeLikeIntrinsic(),
+            "!unsafe metadata on assume-like intrinsic", II);
+#endif
+      Check(!isa<AllocaInst>(&I), "!unsafe metadata on alloca", &I);
+    }
+}
+
 
   // Identify the unsafe scopes.
   SmallSet<uint64_t, 4> UnsafeScopeIDs;
@@ -7820,65 +7833,30 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
 }
 
 void Verifier::verifyUnsafeScope(const Function &F, uint64_t ID) {
-  verifyUnsafeEnterExit(F, ID);
-  verifyUnsafeInOut(F, ID);
-}
-
-void Verifier::verifyUnsafeEnterExit(const Function &F,
-                                     uint64_t ID) {
   using namespace llvm::PatternMatch;
-  // TODO: We can simplify this by:
-  // (1) collecting the set of llvm.unsafe.enter(x) intrinsics,
-  // (2) starting the CFG traversal from there,
-  // (3) flag error if we ever re-visit an llvm.unsafe.enter(x).
-  // This could then possibly even be refactored to share code with
-  // verifyUnsafeInOut().
-  // TODO: This also shares code with UnsafeScopeAnalysis -- could refactor with that.
+#if 0
+  verifyUnsafeEnterExit(F, ID);
+#endif
+  verifyUnsafeInOut(F, ID);
 
-  SmallVector<const Instruction *> Todo;
-  SmallSet<const Instruction *, 4> Seen;
-  for (const Instruction &I : llvm::instructions(F))
-    if (match(&I, m_Intrinsic<Intrinsic::unsafe_enter>(m_SpecificInt(ID))))
-      Todo.push_back(&I);
-  while (!Todo.empty()) {
-    const Instruction *I = Todo.pop_back_val();
-
-    // If we've seen this already, then skip.
-    if (!Seen.insert(I).second) {
-      // If this is an llvm.unsafe.enter, we're in trouble.
-      Check(!match(I, m_Intrinsic<Intrinsic::unsafe_enter>()),
-            "llvm.unsafe.enter re-visited", I);
-      continue;
+  // Make sure we don't have overlapping scopes.
+  auto Insts = getUnsafeScopeInsts(const_cast<Function &>(F), ID);
+  for (const Instruction *I : Insts) {
+    if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe))) {
+      if (MyID != ID) {
+        dumpUnsafeScope(F, ID);
+        dumpUnsafeScope(F, *MyID);
+      }
+      Check(MyID == ID,
+            formatv("wrong metadata ({}) in unsafe scope ({})", *MyID, ID), I);
     }
-
-    // If this is llvm.unsafe.exit, then skip.
-    uint64_t ExitID;
-    if (match(I, m_Intrinsic<Intrinsic::unsafe_exit>(m_ConstantInt(ExitID)))) {
-      Check(ExitID == ID, "Improperly nested scope exit", I);
-      continue;
-    }
-
-    // If this a mismatched llvm.unsafe.enter, then skip.
-    uint64_t EnterID;
-    if (match(I,
-              m_Intrinsic<Intrinsic::unsafe_enter>(m_ConstantInt(EnterID)))) {
-      Check(EnterID == ID, "Improperly nested scope enter", I);
-    }
-
-    // If this is a return, error. All scopes should be closed before return.
-    Check(!isa<ReturnInst>(I), formatv("Return before llvm.unsafe.exit({})", ID), I);
-
-    // Add successors.
-    if (auto *Succ = I->getNextNode()) {
-      Todo.push_back(Succ);
-    } else {
-      for (auto *Succ : llvm::successors(I->getParent()))
-        Todo.push_back(&Succ->front());
-    }
+    uint64_t MyID;
+    if (match(I, m_Intrinsic<Intrinsic::unsafe_in>(m_Value(),
+                                                   m_ConstantInt(MyID))) ||
+        match(I, m_Intrinsic<Intrinsic::unsafe_out>(m_Value(),
+                                                    m_ConstantInt(MyID))))
+      Check(MyID == ID, formatv("wrong intrinsic in unsafe scope {}", ID), I);
   }
-
-  // TODO: Should we also check for unreachable exits? Unreachable enters?
-  // Or maybe all unreachable llvm.unsafe.*?
 }
 
 void Verifier::verifyUnsafeInOut(const Function &F, uint64_t UnsafeScopeID) {
@@ -7921,7 +7899,7 @@ void Verifier::verifyUnsafeInOut(const Function &F, uint64_t UnsafeScopeID) {
             "improperly nested llvm.unsafe.in", I);
 
     // If this a return, then the function is broken.
-    Check(!isa<ReturnInst>(I), "llvm.unsafe.in reached return", I);
+    Check(!unsafe::isReturnLike(*I), "llvm.unsafe.in reached return", I);
 
     // Add data-flow successors.
     for (const Use &U : I->uses())

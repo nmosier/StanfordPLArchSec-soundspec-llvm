@@ -1,8 +1,11 @@
 #include "llvm/IR/UnsafeScope.h"
 
+#include "llvm-c/Core.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/InstIterator.h"
@@ -149,11 +152,20 @@ static void appendPredecessors(Instruction *I,
   }
 }
 
+bool unsafe::isReturnLike(const Instruction &I) {
+  if (!I.isTerminator())
+    return false;
+  if (isa<ReturnInst, ResumeInst>(&I))
+    return true;
+  auto *B = I.getParent();
+  return llvm::succ_empty(B);
+}
+
 static auto computeControlScope(Function &F, uint64_t ID) {
   SmallVector<Instruction *> Todo;
-  SmallSet<Instruction *, 4> Seen;
+  SmallSet<Instruction *, 4> SeenFwd, SeenBwd;
 
-  auto dfs = [&](auto AddNext) {
+  auto dfs = [&](auto &Seen, auto AddNext) {
     while (!Todo.empty()) {
       auto *I = Todo.pop_back_val();
 
@@ -173,18 +185,18 @@ static auto computeControlScope(Function &F, uint64_t ID) {
 
   // Forward pass.
   Todo.push_back(&F.getEntryBlock().front());
-  dfs(appendSuccessors);
+  dfs(SeenFwd, appendSuccessors);
 
   // Backward pass.
   for (Instruction &I : llvm::instructions(F))
-    if (isa<ReturnInst>(&I))
+    if (unsafe::isReturnLike(I))
       Todo.push_back(&I);
-  dfs(appendPredecessors);
+  dfs(SeenBwd, appendPredecessors);
 
   // Compute the instructions in the scope.
   SmallSet<Instruction *, 4> Insts;
   for (Instruction &I : llvm::instructions(F))
-    if (!Seen.contains(&I))
+    if (!SeenFwd.contains(&I) && !SeenBwd.contains(&I))
       Insts.insert(&I);
   return Insts;
 }
@@ -253,11 +265,30 @@ static auto computeDataScope(Function &F, uint64_t ID) {
   return Seen;
 }
 
+static bool isValidUnsafeScopeInst(const Instruction *I) {
+  auto *II = dyn_cast<IntrinsicInst>(I);
+  if (II && II->isAssumeLikeIntrinsic())
+    return false;
+  if (isa<AllocaInst>(I))
+    return false;
+  return true;
+}
+
 SmallSet<Instruction *, 4> llvm::getUnsafeScopeInsts(Function &F, uint64_t ID) {
   auto ControlScope = computeControlScope(F, ID);
   auto DataScope = computeDataScope(F, ID);
   SmallSet<Instruction *, 4> Result;
-  llvm::copy(ControlScope, std::inserter(Result, Result.end()));
-  llvm::copy(DataScope, std::inserter(Result, Result.end()));
+
+  llvm::copy_if(ControlScope, std::inserter(Result, Result.end()), isValidUnsafeScopeInst);
+  llvm::copy_if(DataScope, std::inserter(Result, Result.end()), isValidUnsafeScopeInst);
+
   return Result;
+}
+
+void llvm::dumpUnsafeScope(const Function &F, uint64_t ID) {
+  auto Insts = getUnsafeScopeInsts(const_cast<Function &>(F), ID);
+  errs() << "unsafe scope for " << ID << ": [\n";
+  for (auto *I : Insts)
+    errs() << "    " << *I << "\n";
+  errs() << "]\n";
 }

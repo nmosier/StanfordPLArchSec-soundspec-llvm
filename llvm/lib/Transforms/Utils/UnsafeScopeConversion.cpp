@@ -33,6 +33,11 @@ static void maybeInsertUnsafeIn(Function &F, uint64_t ID,
       SrcI && Insts.contains(SrcI))
     return;
 
+  // NOTE: Think about this more.
+  // For now, don't mask constants, etc.
+  if (!isa<Instruction, Argument>(SrcU.get()))
+    return;
+
   PHINode *DestPhi = dyn_cast<PHINode>(DestI);
   Instruction *InsertBeforeInst = DestI;
   if (DestPhi) {
@@ -107,11 +112,19 @@ void llvm::repairUnsafeScope(Function &F, uint64_t ID,
       [[maybe_unused]] auto *OldMD = I->getMetadata(LLVMContext::MD_unsafe);
       assert(OldMD == nullptr || OldMD == MD);
       I->setMetadata(LLVMContext::MD_unsafe, MD);
+      continue;
     }
+
+    // Otherwise, strip the metadata.
+    I->setMetadata(LLVMContext::MD_unsafe, nullptr);
   }
 
   // Mark any register data-flow edges with llvm.unsafe.in/out.
   for (Instruction *I : Insts) {
+    // If the instruction already has !unsafe metadata, there is no need
+    // to mark its inputs and outputs with llvm.unsafe.in/out.
+    if (I->getMetadata(LLVMContext::MD_unsafe))
+      continue;
     for (Use &SrcU : I->operands())
       maybeInsertUnsafeIn(F, ID, Insts, SrcU, I);
     for (Use &DestU : I->uses())
@@ -139,4 +152,22 @@ void llvm::repairUnsafeScopes(Function &F) {
     auto Insts = getUnsafeScopeInsts(F, ID);
     repairUnsafeScope(F, ID, Insts);
   }
+
+  for (Instruction &I : llvm::instructions(F)) {
+    if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+      if (II->isAssumeLikeIntrinsic())
+        II->setMetadata(LLVMContext::MD_unsafe, nullptr);
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// New-pass-manager wrapper
+//===----------------------------------------------------------------------===//
+
+PreservedAnalyses
+RepairUnsafeScopesPass::run(Function &F, FunctionAnalysisManager &AM) {
+  repairUnsafeScopes(F);
+  // Conservative: assume the repair may have created/erased instructions.
+  return PreservedAnalyses::none();
 }
