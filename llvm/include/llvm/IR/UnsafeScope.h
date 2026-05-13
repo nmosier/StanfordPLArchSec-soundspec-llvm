@@ -108,6 +108,14 @@ OutputIt insertPredecessors(Instruction *I, OutputIt Out) {
 
 SmallSet<Instruction *, 4> getUnsafeScopeInsts(Function &F, uint64_t ID);
 
+void dumpUnsafeScope(const Function &F, uint64_t ID);
+
+namespace unsafe {
+
+bool isReturnLike(const Instruction &I);
+
+}
+
 } // namespace llvm
 
 #endif
