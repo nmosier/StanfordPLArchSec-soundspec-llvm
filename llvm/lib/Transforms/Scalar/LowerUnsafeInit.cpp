@@ -49,27 +49,18 @@ STATISTIC(NumStoresTagged,
           "[soundspec] number of initialization stores tagged with !unsafe");
 STATISTIC(NumInstsTagged,
           "[soundspec] number of initialization accesses tagged with !unsafe");
+STATISTIC(NumAllocasEverFullyInitialized,
+          "[soundspec] number of allocas that are ever fully initialized at "
+          "any program point");
+STATISTIC(NumCallBasesTagged, "[soundspec] number of CallBase tagged with !unsafe");
+STATISTIC(NumIntrinsicsTagged,
+          "[soundspec] number of IntrinsicInst tagged with !unsafe");
+STATISTIC(NumInstsTaggedFullyInit,
+          "[soundspec] number of instructions tagged with !unsafe for allocas "
+          "that are fully initialized at some point");
 
 
 namespace {
-
-/// Identify the stores that initialize `AI` and tag them with `ScopeMD`.
-/// TODO: define what "initialization store" means precisely. Candidates:
-///   - the first store on every control-flow path from the alloca to a use;
-///   - any store dominating all loads of `AI`;
-///   - syntactic heuristics from frontend (e.g. immediately following the
-///     alloca, or grouped with `llvm.lifetime.start`).
-/// Fill in the implementation below.
-static bool tagInitializationStores(AllocaInst &AI, MDNode *ScopeMD) {
-  (void)AI;
-  (void)ScopeMD;
-  // TODO: walk users / dominator tree / lifetime markers to find the
-  // init stores. For each found store, call:
-  //     S->setMetadata(LLVMContext::MD_unsafe, ScopeMD);
-  //     ++NumStoresTagged;
-  // Return true iff any store was tagged.
-  return false;
-}
 
 struct P {
   using T = SmallBitVector;
@@ -234,6 +225,13 @@ static void identifyInitializationStores(Function &F, AllocaInst *AI, AAResults 
     }
   } while (Changed);
 
+  // STATS: Was this alloca ever fully initialized?
+  bool EverFullyInit = llvm::any_of(F, [&Map](auto &B) -> bool {
+    return Map[&B].Out.all();
+  });
+  if (EverFullyInit)
+    ++NumAllocasEverFullyInitialized;
+
   for (BasicBlock &B : F) {
     auto BV = Map[&B].In;
 
@@ -244,11 +242,18 @@ static void identifyInitializationStores(Function &F, AllocaInst *AI, AAResults 
         auto *MD =
             unsafe::mergeMetadata(I.getMetadata(LLVMContext::MD_unsafe),
                                   AI->getMetadata(LLVMContext::MD_unsafe));
+        assert(MD);
         I.setMetadata(LLVMContext::MD_unsafe, MD);
 
         ++NumInstsTagged;
         if (I.mayWriteToMemory())
           ++NumStoresTagged;
+        if (isa<CallBase>(&I))
+          ++NumCallBasesTagged;
+        if (isa<IntrinsicInst>(&I))
+          ++NumIntrinsicsTagged;
+        if (EverFullyInit)
+          ++NumInstsTaggedFullyInit;
       }
 
       // Step forward over the instruction.
