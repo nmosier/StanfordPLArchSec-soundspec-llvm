@@ -1092,7 +1092,7 @@ public:
   LLVM_ABI InstListType::iterator eraseFromParentWithUnsafe(bool UnsafeOK = true);
 
 private:
-  bool CanDelete = true;
+  bool CanDelete = false;
 
 public:
   void setCanDelete() { CanDelete = true; }

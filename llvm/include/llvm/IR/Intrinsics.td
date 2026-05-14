@@ -1611,18 +1611,15 @@ def int_unsafe_exit : DefaultAttrsIntrinsic<
     [llvm_i32_ty],
     [IntrInaccessibleMemOnly, IntrConvergent, ImmArg<ArgIndex<0>>]>;
 
-// `llvm.unsafe.dep.<T>.<U>(<T> value, <U> dep_target)` records that
-// `value` carries a SoundSpec-relevant dependency on `dep_target`.
-// Like `llvm.unsafe.in`/`llvm.unsafe.out`, it is a pure
+// `llvm.unsafe.dep.<T>(<T> value, i32 imm scope_id)` is a pure
 // identity-passthrough on its first argument (return type matches the
-// first arg's type). The second arg is an arbitrary value (Argument
-// or Instruction in practice); if it ever becomes a constant it has
-// no dependency-tracking meaning and the call is folded to `value`
-// (see `InstructionSimplify::simplifyBinaryIntrinsic`).
+// first arg's type), like `llvm.unsafe.in`/`llvm.unsafe.out`. The
+// second argument is an immediate scope ID (same `u32` namespace as
+// the other markers).
 def int_unsafe_dep : PureIntrinsic<
     [llvm_any_ty],
-    [LLVMMatchType<0>, llvm_any_ty],
-    []>;
+    [LLVMMatchType<0>, llvm_i32_ty],
+    [ImmArg<ArgIndex<1>>]>;
 
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //

@@ -110,6 +110,8 @@ SmallSet<Instruction *, 4> getUnsafeScopeInsts(Function &F, uint64_t ID);
 
 void dumpUnsafeScope(const Function &F, uint64_t ID);
 
+std::optional<uint64_t> getValueUnsafeScope(const Value *V);
+
 namespace unsafe {
 
 bool isReturnLike(const Instruction &I);
