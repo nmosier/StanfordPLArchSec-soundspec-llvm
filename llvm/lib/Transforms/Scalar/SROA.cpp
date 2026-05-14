@@ -29,7 +29,6 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -3272,11 +3271,6 @@ private:
     Value *OldOp = LI.getOperand(0);
     assert(OldOp == OldPtr);
 
-    IRB.SetUnsafeMetadata(LI.getMetadata(LLVMContext::MD_unsafe));
-    llvm::scope_exit ResetUnsafeMetadata([&]() {
-      IRB.SetUnsafeMetadata(nullptr);
-    });
-
     AAMDNodes AATags = LI.getAAMetadata();
 
     unsigned AS = LI.getPointerAddressSpace();
@@ -3380,7 +3374,6 @@ private:
       LI.replaceAllUsesWith(V);
     }
 
-    LI.setMetadata(LLVMContext::MD_unsafe, nullptr);
     Pass.DeadInsts.push_back(&LI);
     deleteIfTriviallyDead(OldOp);
     LLVM_DEBUG(dbgs() << "          to: " << *V << "\n");
@@ -3449,7 +3442,6 @@ private:
                      Store, Store->getPointerOperand(),
                      Store->getValueOperand(), DL);
 
-    SI.setMetadata(LLVMContext::MD_unsafe, nullptr);
     Pass.DeadInsts.push_back(&SI);
     LLVM_DEBUG(dbgs() << "          to: " << *Store << "\n");
     return true;
@@ -3462,10 +3454,6 @@ private:
 
     AAMDNodes AATags = SI.getAAMetadata();
     Value *V = SI.getValueOperand();
-
-    llvm::scope_exit ResetUnsafeMetadata(
-        [&]() { IRB.SetUnsafeMetadata(nullptr); });
-    IRB.SetUnsafeMetadata(SI.getMetadata(LLVMContext::MD_unsafe));
 
     // Strip all inbounds GEPs and pointer casts to try to dig out any root
     // alloca that should be re-examined after promoting this alloca.
@@ -3520,7 +3508,6 @@ private:
                      NewSI, NewSI->getPointerOperand(),
                      NewSI->getValueOperand(), DL);
 
-    SI.setMetadata(LLVMContext::MD_unsafe, nullptr);
     Pass.DeadInsts.push_back(&SI);
     deleteIfTriviallyDead(OldOp);
 
@@ -3708,11 +3695,6 @@ private:
     // Rewriting of memory transfer instructions can be a bit tricky. We break
     // them into two categories: split intrinsics and unsplit intrinsics.
 
-    IRB.SetUnsafeMetadata(II.getMetadata(LLVMContext::MD_unsafe));
-    llvm::scope_exit ResetUnsafeMD([&]() {
-      IRB.SetUnsafeMetadata(nullptr);
-    });
-
     LLVM_DEBUG(dbgs() << "    original: " << II << "\n");
 
     AAMDNodes AATags = II.getAAMetadata();
@@ -3778,7 +3760,6 @@ private:
       return false;
     }
     // Record this instruction for deletion.
-    II.setMetadata(LLVMContext::MD_unsafe, nullptr);
     Pass.DeadInsts.push_back(&II);
 
     // Strip all inbounds GEPs and pointer casts to try to dig out any root
@@ -3950,15 +3931,8 @@ private:
            "Unexpected intrinsic!");
     LLVM_DEBUG(dbgs() << "    original: " << II << "\n");
 
-    IRB.SetUnsafeMetadata(II.getMetadata(LLVMContext::MD_unsafe));
-    llvm::scope_exit ResetUnsafeMD([&]() {
-      IRB.SetUnsafeMetadata(nullptr);
-    });
-
     // Record this instruction for deletion.
     Pass.DeadInsts.push_back(&II);
-    // [soundspec] We'll mark the new intrinsics with the same unsafe scope.
-    II.setMetadata(LLVMContext::MD_unsafe, nullptr);
 
     if (II.isDroppable()) {
       assert(II.getIntrinsicID() == Intrinsic::assume && "Expected assume");
@@ -4285,8 +4259,6 @@ private:
 
     // We have an aggregate being loaded, split it apart.
     LLVM_DEBUG(dbgs() << "    original: " << LI << "\n");
-    llvm::scope_exit ResetUnsafeMD([&]() { IRB.SetUnsafeMetadata(nullptr); });
-    IRB.SetUnsafeMetadata(LI.getMetadata(LLVMContext::MD_unsafe));
     LoadOpSplitter Splitter(&LI, *U, LI.getType(), LI.getAAMetadata(),
                             getAdjustedAlignment(&LI, 0), DL, IRB);
     Splitter.recordFakeUses(LI);
@@ -6101,10 +6073,8 @@ bool SROA::deleteDeadInstructions(
       if (Instruction *U = dyn_cast<Instruction>(Operand)) {
         // Zero out the operand and see if it becomes trivially dead.
         Operand = nullptr;
-        if (isInstructionTriviallyDead(U)) {
-          U->setMetadata(LLVMContext::MD_unsafe, nullptr);
+        if (isInstructionTriviallyDead(U))
           DeadInsts.push_back(U);
-        }
       }
 
     ++NumDeleted;
