@@ -1,4 +1,5 @@
 #include "llvm/IR/UnsafeScope.h"
+#include "LLVMContextImpl.h"
 
 #include "llvm-c/Core.h"
 #include "llvm/ADT/STLExtras.h"
@@ -12,6 +13,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/PatternMatch.h"
+#include <optional>
 
 using namespace llvm;
 
@@ -162,41 +164,10 @@ bool unsafe::isReturnLike(const Instruction &I) {
 }
 
 static auto computeControlScope(Function &F, uint64_t ID) {
-  SmallVector<Instruction *> Todo;
-  SmallSet<Instruction *, 4> SeenFwd, SeenBwd;
-
-  auto dfs = [&](auto &Seen, auto AddNext) {
-    while (!Todo.empty()) {
-      auto *I = Todo.pop_back_val();
-
-      // If this has !unsafe metadata, skip.
-      if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe));
-          MyID == ID)
-        continue;
-
-      // If we've seen it already, skip.
-      if (!Seen.insert(I).second)
-        continue;
-
-      // Add successors/predecessors.
-      AddNext(I, Todo);
-    }
-  };
-
-  // Forward pass.
-  Todo.push_back(&F.getEntryBlock().front());
-  dfs(SeenFwd, appendSuccessors);
-
-  // Backward pass.
-  for (Instruction &I : llvm::instructions(F))
-    if (unsafe::isReturnLike(I))
-      Todo.push_back(&I);
-  dfs(SeenBwd, appendPredecessors);
-
-  // Compute the instructions in the scope.
   SmallSet<Instruction *, 4> Insts;
-  for (Instruction &I : llvm::instructions(F))
-    if (!SeenFwd.contains(&I) && !SeenBwd.contains(&I))
+  for (Instruction &I : instructions(F))
+    if (auto MyID = getUnsafeScopeID(I.getMetadata(LLVMContext::MD_unsafe));
+        MyID == ID)
       Insts.insert(&I);
   return Insts;
 }
@@ -291,4 +262,32 @@ void llvm::dumpUnsafeScope(const Function &F, uint64_t ID) {
   for (auto *I : Insts)
     errs() << "    " << *I << "\n";
   errs() << "]\n";
+}
+
+static std::optional<uint64_t>
+getValueUnsafeScopeRec(const Value *V, SmallSet<const Value *, 4> &Seen) {
+  // If already seen, skip.
+  if (!Seen.insert(V).second)
+    return std::nullopt;
+
+  // Handle if it's an instruction with !unsafe metadata.
+  if (auto *I = dyn_cast<Instruction>(V)) {
+    if (auto ID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe)))
+      return ID;
+  }
+
+  // Otherwise, follow its uses.
+  if (auto *U = dyn_cast<User>(V)) {
+    for (Value *X : U->operands()) {
+      if (auto ID = getValueUnsafeScopeRec(X, Seen))
+        return ID;
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::optional<uint64_t> llvm::getValueUnsafeScope(const Value *V) {
+  SmallSet<const Value *, 4> Seen;
+  return getValueUnsafeScopeRec(V, Seen);
 }

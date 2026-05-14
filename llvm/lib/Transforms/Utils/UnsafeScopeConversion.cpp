@@ -132,9 +132,23 @@ void llvm::repairUnsafeScope(Function &F, uint64_t ID,
   }
 }
 
+static void assignAllocaInitUnsafeScopes(Function &F) {
+  for (Instruction &I : llvm::instructions(F)) {
+    auto *MD = I.getMetadata(LLVMContext::MD_unsafe_init);
+    if (!MD)
+      continue;
+    assert(isa<AllocaInst>(&I) &&
+           "!unsafe.init metadata only allowed on allocas");
+  }
+}
+
 void llvm::repairUnsafeScopes(Function &F) {
   using namespace llvm::PatternMatch;
 
+  // Find any !unsafe.init metadata and assign scopes for it.
+  assignAllocaInitUnsafeScopes(F);
+
+  // Collect IDs.
   SmallSet<uint64_t, 4> IDs;
   for (Instruction &I : llvm::instructions(F)) {
     uint64_t ID;
@@ -160,6 +174,7 @@ void llvm::repairUnsafeScopes(Function &F) {
     }
   }
 }
+
 
 //===----------------------------------------------------------------------===//
 // New-pass-manager wrapper

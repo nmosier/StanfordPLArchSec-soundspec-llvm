@@ -2808,8 +2808,14 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
       auto TagInlinedRange = [&](MDNode *MD) {
         for (Function::iterator BB = FirstNewBlock, E = Caller->end(); BB != E;
              ++BB)
-          for (Instruction &I : *BB)
+          for (Instruction &I : *BB) {
+            // SoundSpec: allocas allocate stack slots; they aren't
+            // "operations" that can belong to an unsafe scope, so tagging
+            // them with `!unsafe` is a category error. Skip.
+            if (isa<AllocaInst>(&I))
+              continue;
             I.setMetadata(LLVMContext::MD_unsafe, MD);
+          }
       };
 
       if (CallerUnsafe) {
