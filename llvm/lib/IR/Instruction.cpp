@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/IR/Instruction.h"
+#include "llvm-c/TargetMachine.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/AttributeMask.h"
@@ -63,7 +64,7 @@ Instruction::Instruction(Type *ty, unsigned it, AllocInfo AllocInfo,
 Instruction::~Instruction() {
   assert(!getParent() && "Instruction still linked in the program!");
 
-  if (!CanDelete) {
+  if (!CanDelete && getMetadata(LLVMContext::MD_unsafe)) {
     errs() << "[soundspec] internal error: deleting unhandled instruction: "
            << *this << "\n";
     std::abort();
