@@ -69,6 +69,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -118,6 +119,26 @@ STATISTIC(
     "Number of stores rewritten into predicated loads to allow promotion");
 STATISTIC(NumDeleted, "Number of instructions deleted");
 STATISTIC(NumVectorized, "Number of vectorized aggregates");
+
+// [soundspec] Per-site counters. Increment when a SROA optimization
+// path is skipped because it would interact poorly with `!unsafe`
+// metadata. SROA falls back to a less-aggressive (but
+// soundspec-correct) rewrite for these partitions.
+STATISTIC(NumSoundSpecIntegerWideningBailed,
+          "[soundspec] partitions where integer widening was disabled "
+          "due to !unsafe");
+STATISTIC(NumSoundSpecVectorPromotionBailed,
+          "[soundspec] partitions where vector promotion was disabled "
+          "due to !unsafe");
+STATISTIC(NumSoundSpecTreeMergeBailed,
+          "[soundspec] partitions where tree-structured merge was "
+          "disabled due to !unsafe");
+STATISTIC(NumSoundSpecPHISpeculationBailed,
+          "[soundspec] PHI-of-pointers load speculations bailed "
+          "due to !unsafe");
+STATISTIC(NumSoundSpecSelectSpeculationBailed,
+          "[soundspec] select-of-pointers loads/stores bailed "
+          "due to !unsafe");
 
 namespace llvm {
 /// Disable running mem2reg during SROA in order to test or debug SROA.
@@ -1592,6 +1613,24 @@ findCommonType(AllocaSlices::const_iterator B, AllocaSlices::const_iterator E,
 static bool isSafePHIToSpeculate(PHINode &PN) {
   const DataLayout &DL = PN.getDataLayout();
 
+  // [soundspec] Bail if the PHI or any of its load users carry an
+  // `!unsafe` scope tag. With multi-successor predecessors this
+  // transform performs actual speculative execution (the load runs on
+  // paths the original program wouldn't have taken), which is exactly
+  // the kind of gadget SoundSpec wants to suppress in unsafe scopes.
+  // Even in the single-successor predecessor case it's safest to leave
+  // tagged loads where they are, so just refuse uniformly.
+  if (PN.getMetadata(LLVMContext::MD_unsafe)) {
+    ++NumSoundSpecPHISpeculationBailed;
+    return false;
+  }
+  for (User *U : PN.users())
+    if (auto *LI = dyn_cast<LoadInst>(U))
+      if (LI->getMetadata(LLVMContext::MD_unsafe)) {
+        ++NumSoundSpecPHISpeculationBailed;
+        return false;
+      }
+
   // For now, we can only do this promotion if the load is in the same block
   // as the PHI, and if there are no stores between the phi and load.
   // TODO: Allow recursive phi users.
@@ -1664,6 +1703,12 @@ static bool isSafePHIToSpeculate(PHINode &PN) {
 }
 
 static void speculatePHINodeLoads(IRBuilderTy &IRB, PHINode &PN) {
+  // [soundspec] No metadata propagation needed here: `isSafePHIToSpeculate`
+  // bails out before SROA reaches this path when the PHI or any of its
+  // load users carries `!unsafe`. So by construction PN and SomeLoad
+  // are untagged.
+  assert(!PN.getMetadata(LLVMContext::MD_unsafe) &&
+         "isSafePHIToSpeculate should have rejected this PHI");
   LLVM_DEBUG(dbgs() << "    original: " << PN << "\n");
 
   LoadInst *SomeLoad = cast<LoadInst>(PN.user_back());
@@ -1773,6 +1818,14 @@ SROA::isSafeSelectToSpeculate(SelectInst &SI, bool PreserveCFG) {
       // however, so if we can't turn it into a predicated store, we are done.
       if (Store->isVolatile() || PreserveCFG)
         return {}; // Give up on this `select`.
+      // [soundspec] Bail if the store carries an `!unsafe` scope tag.
+      // Speculating or branching it would either reorder a tagged op
+      // relative to the select condition or duplicate it onto both arms,
+      // either of which loses the per-op scope identity.
+      if (Store->getMetadata(LLVMContext::MD_unsafe)) {
+        ++NumSoundSpecSelectSpeculationBailed;
+        return {};
+      }
       Ops.emplace_back(Store);
       continue;
     }
@@ -1783,6 +1836,12 @@ SROA::isSafeSelectToSpeculate(SelectInst &SI, bool PreserveCFG) {
     // atomic semantics do not have any meaning for a local alloca.
     if (!LI || LI->isVolatile())
       return {}; // Give up on this `select`.
+    // [soundspec] Bail if the load carries an `!unsafe` scope tag.
+    // Same rationale as the tagged-store case above.
+    if (LI->getMetadata(LLVMContext::MD_unsafe)) {
+      ++NumSoundSpecSelectSpeculationBailed;
+      return {};
+    }
 
     PossiblySpeculatableLoad Load(LI);
     if (!LI->isSimple()) {
@@ -1808,6 +1867,11 @@ SROA::isSafeSelectToSpeculate(SelectInst &SI, bool PreserveCFG) {
 
 static void speculateSelectInstLoads(SelectInst &SI, LoadInst &LI,
                                      IRBuilderTy &IRB) {
+  // [soundspec] `isSafeSelectToSpeculate` rejects any select whose
+  // load/store users carry an `!unsafe` scope tag, so we should never
+  // reach this with a tagged load.
+  assert(!LI.getMetadata(LLVMContext::MD_unsafe) &&
+         "isSafeSelectToSpeculate should have rejected this select");
   LLVM_DEBUG(dbgs() << "    original load: " << SI << "\n");
 
   Value *TV = SI.getTrueValue();
@@ -1915,6 +1979,10 @@ static void rewriteMemOpOfSelect(SelectInst &SelInst, Instruction &I,
 static bool rewriteSelectInstMemOps(SelectInst &SI,
                                     const RewriteableMemOps &Ops,
                                     IRBuilderTy &IRB, DomTreeUpdater *DTU) {
+  // [soundspec] `isSafeSelectToSpeculate` filters out tagged users
+  // before they reach here, so we should never see one. The downstream
+  // cloning in `rewriteMemOpOfSelect` uses `clone()` and so inherits
+  // any present `!unsafe` metadata automatically.
   bool CFGChanged = false;
   LLVM_DEBUG(dbgs() << "    original select: " << SI << "\n");
 
@@ -2374,6 +2442,31 @@ static VectorType *createAndCheckVectorTypesForPromotion(
 /// be promotable, so we have an early test here.
 static VectorType *isVectorPromotionViable(Partition &P, const DataLayout &DL,
                                            unsigned VScale) {
+  // [soundspec] Bail if any user in the partition carries an `!unsafe`
+  // scope tag. Vector promotion rewrites scalar loads/stores as wide
+  // load/extract or load-modify-store sequences against a single wide
+  // vector alloca, which dissolves the per-op scope identity. Falling
+  // back to the normal partition rewriter preserves the tags faithfully.
+  //
+  // TODO: this could be optimized — if all the partition's loads and
+  // stores share a single `!unsafe` scope, we could propagate that
+  // scope onto the synthesized wide loads and stores. Implement that
+  // if it shows up on benchmarks.
+  auto SliceIsUnsafe = [](const Slice &S) {
+    const auto *I = cast<Instruction>(S.getUse()->getUser());
+    return I->getMetadata(LLVMContext::MD_unsafe) != nullptr;
+  };
+  for (const Slice &S : P)
+    if (SliceIsUnsafe(S)) {
+      ++NumSoundSpecVectorPromotionBailed;
+      return nullptr;
+    }
+  for (const Slice *S : P.splitSliceTails())
+    if (SliceIsUnsafe(*S)) {
+      ++NumSoundSpecVectorPromotionBailed;
+      return nullptr;
+    }
+
   // Collect the candidate types for vector-based promotion. Also track whether
   // we have different element types.
   SmallVector<VectorType *, 4> CandidateTys;
@@ -2551,6 +2644,32 @@ static bool isIntegerWideningViableForSlice(const Slice &S,
 /// promote the resulting alloca.
 static bool isIntegerWideningViable(Partition &P, Type *AllocaTy,
                                     const DataLayout &DL) {
+  // [soundspec] Bail if any user in the partition carries an `!unsafe`
+  // scope tag. Integer widening replaces partial loads/stores with
+  // wide load/extract or load-modify-store sequences against a single
+  // wide integer alloca, which dissolves the per-op scope identity.
+  // Falling back to the normal partition rewriter preserves the tags
+  // faithfully.
+  //
+  // TODO: this could be optimized — if all the partition's loads and
+  // stores share a single `!unsafe` scope, we could propagate that
+  // scope onto the synthesized wide loads and stores. Implement that
+  // if it shows up on benchmarks.
+  auto SliceIsUnsafe = [](const Slice &S) {
+    const auto *I = cast<Instruction>(S.getUse()->getUser());
+    return I->getMetadata(LLVMContext::MD_unsafe) != nullptr;
+  };
+  for (const Slice &S : P)
+    if (SliceIsUnsafe(S)) {
+      ++NumSoundSpecIntegerWideningBailed;
+      return false;
+    }
+  for (const Slice *S : P.splitSliceTails())
+    if (SliceIsUnsafe(*S)) {
+      ++NumSoundSpecIntegerWideningBailed;
+      return false;
+    }
+
   uint64_t SizeInBits = DL.getTypeSizeInBits(AllocaTy).getFixedValue();
   // Don't create integer types larger than the maximum bitwidth.
   if (SizeInBits > IntegerType::MAX_INT_BITS)
@@ -2989,6 +3108,31 @@ public:
   ///         using tree-structured merge
   std::optional<SmallVector<Value *, 4>>
   rewriteTreeStructuredMerge(Partition &P) {
+    // [soundspec] Bail if any store or load in the partition carries an
+    // `!unsafe` scope tag. The tree-structured-merge optimization fuses N
+    // stores plus 1 load into one shufflevector chain + one store + one
+    // load, which destroys per-original-op scope identity. Falling back
+    // to the normal partition rewriter preserves the tags faithfully.
+    //
+    // TODO: this could be optimized — if all the partition's stores share
+    // a single `!unsafe` scope (and the load matches or is untagged), we
+    // could propagate that single scope onto the synthesized merged store
+    // (and the load's scope onto the synthesized merged load) instead of
+    // bailing. Implement that if it shows up on benchmarks.
+    auto SliceIsUnsafe = [](const Slice &S) {
+      const auto *I = cast<Instruction>(S.getUse()->getUser());
+      return I->getMetadata(LLVMContext::MD_unsafe) != nullptr;
+    };
+    for (const Slice &S : P)
+      if (SliceIsUnsafe(S)) {
+        ++NumSoundSpecTreeMergeBailed;
+        return std::nullopt;
+      }
+    for (const Slice *S : P.splitSliceTails())
+      if (SliceIsUnsafe(*S)) {
+        ++NumSoundSpecTreeMergeBailed;
+        return std::nullopt;
+      }
     // No tail slices that overlap with the partition
     if (P.splitSliceTails().size() > 0)
       return std::nullopt;
@@ -3230,6 +3374,11 @@ private:
   }
 
   Value *rewriteVectorizedLoadInst(LoadInst &LI) {
+    // [soundspec] No metadata propagation needed here: `isVectorPromotionViable`
+    // bails out before SROA reaches this path when any load or store in
+    // the partition carries `!unsafe`. So by construction LI is untagged.
+    assert(!LI.getMetadata(LLVMContext::MD_unsafe) &&
+           "isVectorPromotionViable should have rejected this partition");
     unsigned BeginIndex = getIndex(NewBeginOffset);
     unsigned EndIndex = getIndex(NewEndOffset);
     assert(EndIndex > BeginIndex && "Empty vector!");
@@ -3243,6 +3392,11 @@ private:
   }
 
   Value *rewriteIntegerLoad(LoadInst &LI) {
+    // [soundspec] No metadata propagation needed here: `isIntegerWideningViable`
+    // bails out before SROA reaches this path when any load or store in
+    // the partition carries `!unsafe`. So by construction LI is untagged.
+    assert(!LI.getMetadata(LLVMContext::MD_unsafe) &&
+           "isIntegerWideningViable should have rejected this partition");
     assert(IntTy && "We cannot insert an integer to the alloca");
     assert(!LI.isVolatile());
     Value *V = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
@@ -3335,8 +3489,11 @@ private:
 
       if (LI.isVolatile())
         NewLI->setAtomic(LI.getOrdering(), LI.getSyncScopeID());
+      // [soundspec] include MD_unsafe so the new load inherits the
+      // original load's scope tag.
       NewLI->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
-                               LLVMContext::MD_access_group});
+                               LLVMContext::MD_access_group,
+                               LLVMContext::MD_unsafe});
 
       V = NewLI;
       IsPtrAdjusted = true;
@@ -3365,8 +3522,15 @@ private:
       Value *Placeholder =
           new LoadInst(LI.getType(), PoisonValue::get(IRB.getPtrTy(AS)), "",
                        false, Align(1));
-      V = insertInteger(DL, IRB, Placeholder, V, NewBeginOffset - BeginOffset,
-                        "insert");
+      {
+        // [soundspec] Tag every instruction synthesized by insertInteger
+        // (zext / shl / and / or) with the original load's `!unsafe`
+        // scope. The reassembled wide value is morally part of the
+        // original tagged load.
+        UnsafeBuilderScope UBS(IRB, LI);
+        V = insertInteger(DL, IRB, Placeholder, V,
+                          NewBeginOffset - BeginOffset, "insert");
+      }
       LI.replaceAllUsesWith(V);
       Placeholder->replaceAllUsesWith(&LI);
       Placeholder->deleteValue();
@@ -3382,6 +3546,11 @@ private:
 
   bool rewriteVectorizedStoreInst(Value *V, StoreInst &SI, Value *OldOp,
                                   AAMDNodes AATags) {
+    // [soundspec] No metadata propagation needed here: `isVectorPromotionViable`
+    // bails out before SROA reaches this path when any load or store in
+    // the partition carries `!unsafe`. So by construction SI is untagged.
+    assert(!SI.getMetadata(LLVMContext::MD_unsafe) &&
+           "isVectorPromotionViable should have rejected this partition");
     // Capture V for the purpose of debug-info accounting once it's converted
     // to a vector store.
     Value *OrigV = V;
@@ -3419,6 +3588,11 @@ private:
   }
 
   bool rewriteIntegerStore(Value *V, StoreInst &SI, AAMDNodes AATags) {
+    // [soundspec] No metadata propagation needed here: `isIntegerWideningViable`
+    // bails out before SROA reaches this path when any store in the
+    // partition carries `!unsafe`. So by construction SI is untagged.
+    assert(!SI.getMetadata(LLVMContext::MD_unsafe) &&
+           "isIntegerWideningViable should have rejected this partition");
     assert(IntTy && "We cannot extract an integer from the alloca");
     assert(!SI.isVolatile());
     if (DL.getTypeSizeInBits(V->getType()).getFixedValue() !=
@@ -3494,8 +3668,11 @@ private:
       NewSI =
           IRB.CreateAlignedStore(V, NewPtr, getSliceAlign(), SI.isVolatile());
     }
+    // [soundspec] include MD_unsafe so the new store inherits the
+    // original store's scope tag.
     NewSI->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
-                             LLVMContext::MD_access_group});
+                             LLVMContext::MD_access_group,
+                             LLVMContext::MD_unsafe});
     if (AATags)
       NewSI->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   V->getType(), DL));
@@ -3603,6 +3780,8 @@ private:
       MemIntrinsic *New = cast<MemIntrinsic>(IRB.CreateMemSet(
           getNewAllocaSlicePtr(IRB, OldPtr->getType()), II.getValue(), Size,
           MaybeAlign(getSliceAlign()), II.isVolatile()));
+      // [soundspec] propagate !unsafe from the original memset call.
+      New->copyMetadata(II, {LLVMContext::MD_unsafe});
       if (AATags)
         New->setAAMetadata(
             AATags.adjustForAccess(NewBeginOffset - BeginOffset, Sz));
@@ -3622,6 +3801,12 @@ private:
     Value *V;
 
     if (VecTy) {
+      // [soundspec] No metadata propagation needed here:
+      // `isVectorPromotionViable` would have rejected the partition if
+      // this memset carried `!unsafe`, so VecTy would be null and we
+      // wouldn't be in this branch.
+      assert(!II.getMetadata(LLVMContext::MD_unsafe) &&
+             "isVectorPromotionViable should have rejected this partition");
       // If this is a memset of a vectorized alloca, insert it.
       assert(ElementTy == ScalarTy);
 
@@ -3642,6 +3827,12 @@ private:
                                          NewAI.getAlign(), "oldload");
       V = insertVector(IRB, Old, Splat, BeginIndex, "vec");
     } else if (IntTy) {
+      // [soundspec] No metadata propagation needed here:
+      // `isIntegerWideningViable` would have rejected the partition if
+      // this memset carried `!unsafe`, so IntTy would be null and we
+      // wouldn't be in this branch.
+      assert(!II.getMetadata(LLVMContext::MD_unsafe) &&
+             "isIntegerWideningViable should have rejected this partition");
       // If this is a memset on an alloca where we can widen stores, insert the
       // set integer.
       assert(!II.isVolatile());
@@ -3678,8 +3869,11 @@ private:
     Value *NewPtr = getPtrToNewAI(II.getDestAddressSpace(), II.isVolatile());
     StoreInst *New =
         IRB.CreateAlignedStore(V, NewPtr, NewAI.getAlign(), II.isVolatile());
+    // [soundspec] propagate !unsafe from the original memset call onto the
+    // synthesized store that replaces it.
     New->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
-                           LLVMContext::MD_access_group});
+                           LLVMContext::MD_access_group,
+                           LLVMContext::MD_unsafe});
     if (AATags)
       New->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                 V->getType(), DL));
@@ -3809,6 +4003,9 @@ private:
       }
       CallInst *New = IRB.CreateMemCpy(DestPtr, DestAlign, SrcPtr, SrcAlign,
                                        Size, II.isVolatile());
+      // [soundspec] propagate !unsafe from the original memcpy/memmove
+      // onto the slice-restricted replacement call.
+      New->copyMetadata(II, {LLVMContext::MD_unsafe});
       if (AATags)
         New->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
 
@@ -3869,10 +4066,20 @@ private:
 
     Value *Src;
     if (VecTy && !IsWholeAlloca && !IsDest) {
+      // [soundspec] No metadata propagation needed here:
+      // `isVectorPromotionViable` would have rejected the partition if
+      // this memtransfer carried `!unsafe`, so VecTy would be null.
+      assert(!II.getMetadata(LLVMContext::MD_unsafe) &&
+             "isVectorPromotionViable should have rejected this partition");
       Src = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
                                   NewAI.getAlign(), "load");
       Src = extractVector(IRB, Src, BeginIndex, EndIndex, "vec");
     } else if (IntTy && !IsWholeAlloca && !IsDest) {
+      // [soundspec] No metadata propagation needed here:
+      // `isIntegerWideningViable` would have rejected the partition if
+      // this memtransfer carried `!unsafe`, so IntTy would be null.
+      assert(!II.getMetadata(LLVMContext::MD_unsafe) &&
+             "isIntegerWideningViable should have rejected this partition");
       Src = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
                                   NewAI.getAlign(), "load");
       Src = convertValue(DL, IRB, Src, IntTy);
@@ -3881,8 +4088,10 @@ private:
     } else {
       LoadInst *Load = IRB.CreateAlignedLoad(OtherTy, SrcPtr, SrcAlign,
                                              II.isVolatile(), "copyload");
+      // [soundspec] propagate !unsafe from the original mem transfer.
       Load->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
-                              LLVMContext::MD_access_group});
+                              LLVMContext::MD_access_group,
+                              LLVMContext::MD_unsafe});
       if (AATags)
         Load->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                    Load->getType(), DL));
@@ -3890,10 +4099,20 @@ private:
     }
 
     if (VecTy && !IsWholeAlloca && IsDest) {
+      // [soundspec] No metadata propagation needed here:
+      // `isVectorPromotionViable` would have rejected the partition if
+      // this memtransfer carried `!unsafe`, so VecTy would be null.
+      assert(!II.getMetadata(LLVMContext::MD_unsafe) &&
+             "isVectorPromotionViable should have rejected this partition");
       Value *Old = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
                                          NewAI.getAlign(), "oldload");
       Src = insertVector(IRB, Old, Src, BeginIndex, "vec");
     } else if (IntTy && !IsWholeAlloca && IsDest) {
+      // [soundspec] No metadata propagation needed here:
+      // `isIntegerWideningViable` would have rejected the partition if
+      // this memtransfer carried `!unsafe`, so IntTy would be null.
+      assert(!II.getMetadata(LLVMContext::MD_unsafe) &&
+             "isIntegerWideningViable should have rejected this partition");
       Value *Old = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
                                          NewAI.getAlign(), "oldload");
       Old = convertValue(DL, IRB, Old, IntTy);
@@ -3904,8 +4123,10 @@ private:
 
     StoreInst *Store = cast<StoreInst>(
         IRB.CreateAlignedStore(Src, DstPtr, DstAlign, II.isVolatile()));
+    // [soundspec] propagate !unsafe from the original mem transfer.
     Store->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
-                             LLVMContext::MD_access_group});
+                             LLVMContext::MD_access_group,
+                             LLVMContext::MD_unsafe});
     if (AATags)
       Store->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   Src->getType(), DL));
@@ -4263,7 +4484,12 @@ private:
                             getAdjustedAlignment(&LI, 0), DL, IRB);
     Splitter.recordFakeUses(LI);
     Value *V = PoisonValue::get(LI.getType());
-    Splitter.emitSplitOps(LI.getType(), V, LI.getName() + ".fca");
+    {
+      // [soundspec] Tag the per-leaf loads synthesized by the splitter
+      // with LI's `!unsafe` scope (no-op if LI has none).
+      UnsafeBuilderScope UBS(IRB, LI);
+      Splitter.emitSplitOps(LI.getType(), V, LI.getName() + ".fca");
+    }
     Splitter.emitFakeUses();
     Visited.erase(&LI);
     LI.replaceAllUsesWith(V);
@@ -4335,7 +4561,12 @@ private:
     LLVM_DEBUG(dbgs() << "    original: " << SI << "\n");
     StoreOpSplitter Splitter(&SI, *U, V->getType(), SI.getAAMetadata(), &SI,
                              getAdjustedAlignment(&SI, 0), DL, IRB);
-    Splitter.emitSplitOps(V->getType(), V, V->getName() + ".fca");
+    {
+      // [soundspec] Tag the per-leaf stores synthesized by the splitter
+      // with SI's `!unsafe` scope (no-op if SI has none).
+      UnsafeBuilderScope UBS(IRB, SI);
+      Splitter.emitSplitOps(V->getType(), V, V->getName() + ".fca");
+    }
     Visited.erase(&SI);
     // The stores replacing SI each have markers describing fragments of the
     // assignment so delete the assignment markers linked to SI.
@@ -4977,8 +5208,10 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                          PartPtrTy, BasePtr->getName() + "."),
           getAdjustedAlignment(LI, PartOffset),
           /*IsVolatile*/ false, LI->getName());
+      // [soundspec] propagate !unsafe onto each presplit partial load.
       PLoad->copyMetadata(*LI, {LLVMContext::MD_mem_parallel_loop_access,
-                                LLVMContext::MD_access_group});
+                                LLVMContext::MD_access_group,
+                                LLVMContext::MD_unsafe});
 
       // Append this load onto the list of split loads so we can find it later
       // to rewrite the stores.
@@ -5035,9 +5268,11 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            PartPtrTy, StoreBasePtr->getName() + "."),
             getAdjustedAlignment(SI, PartOffset),
             /*IsVolatile*/ false);
+        // [soundspec] propagate !unsafe onto each presplit partial store.
         PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
                                    LLVMContext::MD_access_group,
-                                   LLVMContext::MD_DIAssignID});
+                                   LLVMContext::MD_DIAssignID,
+                                   LLVMContext::MD_unsafe});
 
         if (AATags)
           PStore->setAAMetadata(
@@ -5126,8 +5361,11 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            LoadPartPtrTy, LoadBasePtr->getName() + "."),
             getAdjustedAlignment(LI, PartOffset),
             /*IsVolatile*/ false, LI->getName());
+        // [soundspec] propagate !unsafe onto each presplit partial load
+        // in the deferred-store case.
         PLoad->copyMetadata(*LI, {LLVMContext::MD_mem_parallel_loop_access,
-                                  LLVMContext::MD_access_group});
+                                  LLVMContext::MD_access_group,
+                                  LLVMContext::MD_unsafe});
       }
 
       // And store this partition.
@@ -5140,8 +5378,11 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                          StorePartPtrTy, StoreBasePtr->getName() + "."),
           getAdjustedAlignment(SI, PartOffset),
           /*IsVolatile*/ false);
+      // [soundspec] propagate !unsafe onto each presplit partial store
+      // in the deferred-store case.
       PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
-                                 LLVMContext::MD_access_group});
+                                 LLVMContext::MD_access_group,
+                                 LLVMContext::MD_unsafe});
 
       // Now build a new slice for the alloca.
       // ProtectedFieldDisc==nullptr is a lie, but it doesn't matter because we
@@ -5353,6 +5594,13 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
         AI.getIterator());
     // Copy the old AI debug location over to the new one.
     NewAI->setDebugLoc(AI.getDebugLoc());
+    // [soundspec] Propagate !unsafe.init and !unsafe from the aggregate
+    // alloca onto each split sub-alloca so the per-field allocas carry
+    // the same scope metadata as the original.
+    if (MDNode *InitMD = AI.getMetadata(LLVMContext::MD_unsafe_init))
+      NewAI->setMetadata(LLVMContext::MD_unsafe_init, InitMD);
+    if (MDNode *UnsafeMD = AI.getMetadata(LLVMContext::MD_unsafe))
+      NewAI->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
     ++NumNewAllocas;
   }
 
