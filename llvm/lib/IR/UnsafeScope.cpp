@@ -12,7 +12,9 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
+#include <iterator>
 #include <optional>
 
 using namespace llvm;
@@ -290,4 +292,38 @@ getValueUnsafeScopeRec(const Value *V, SmallSet<const Value *, 4> &Seen) {
 std::optional<uint64_t> llvm::getValueUnsafeScope(const Value *V) {
   SmallSet<const Value *, 4> Seen;
   return getValueUnsafeScopeRec(V, Seen);
+}
+
+static uint32_t getInt32(Metadata *MD) {
+  auto *CAM = cast<ConstantAsMetadata>(MD);
+  auto *C = cast<ConstantInt>(CAM->getValue());
+  return C->getLimitedValue();
+}
+
+static void sortUniqueMetadata(SmallVectorImpl<Metadata *> &MDs) {
+  llvm::sort(MDs, [&](auto *A, auto *B) { return getInt32(A) < getInt32(B); });
+  MDs.erase(llvm::unique(MDs), MDs.end());
+}
+
+MDNode *unsafe::mergeMetadata(MDNode *A, MDNode *B) {
+  SmallVector<Metadata *> MDs;
+  if (A)
+    llvm::copy(A->operands(), std::back_inserter(MDs));
+  if (B)
+    llvm::copy(B->operands(), std::back_inserter(MDs));
+  if (MDs.empty())
+    return nullptr;
+  sortUniqueMetadata(MDs);
+  auto &Ctx = cast<ConstantAsMetadata>(MDs.front())->getContext();
+  return MDTuple::get(Ctx, MDs);
+}
+
+MDNode *unsafe::removeID(MDNode *MD, uint64_t ID) {
+  if (!MD || !MD->getNumOperands())
+    return nullptr;
+  SmallVector<Metadata *> MDs;
+  llvm::copy(MD->operands(), std::back_inserter(MDs));
+  sortUniqueMetadata(MDs);
+  auto &Ctx = cast<ConstantAsMetadata>(MDs.front())->getContext();
+  return MDTuple::get(Ctx, MDs);
 }

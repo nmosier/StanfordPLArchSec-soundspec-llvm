@@ -115,6 +115,12 @@ std::optional<uint64_t> getValueUnsafeScope(const Value *V);
 namespace unsafe {
 
 bool isReturnLike(const Instruction &I);
+MDNode *mergeMetadata(MDNode *A, MDNode *B);
+
+// Removes the given unsafe scope ID from the list of unsafe scopes `MD`.
+// MD can be null, which denotes an empty list.
+// This function returns null if the resulting unsafe scope ID set is empty.
+MDNode *removeID(MDNode *MD, uint64_t ID);
 
 }
 
