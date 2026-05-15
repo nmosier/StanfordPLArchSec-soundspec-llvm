@@ -2,6 +2,7 @@
 #include "LLVMContextImpl.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/InstrTypes.h"
@@ -16,6 +17,7 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/IRBuilder.h"
 #include <iterator>
+#include <cassert>
 #include <optional>
 
 using namespace llvm;
@@ -356,7 +358,7 @@ bool llvm::isSpeculationPrimitive(const Instruction &I) {
   return false;
 }
 
-Value *llvm::isTransmitter(Instruction &I) {
+Value *llvm::getTransmittedOperand(Instruction &I) {
   if (auto *BI = dyn_cast<BranchInst>(&I))
     return BI->isConditional() ? BI->getCondition() : nullptr;
 
@@ -369,8 +371,16 @@ Value *llvm::isTransmitter(Instruction &I) {
   return nullptr;
 }
 
-const Value *llvm::isTransmitter(const Instruction &I) {
-  return const_cast<const Value *>(isTransmitter(const_cast<Instruction &>(I)));
+const Value *llvm::getTransmittedOperand(const Instruction &I) {
+  return const_cast<const Value *>(getTransmittedOperand(const_cast<Instruction &>(I)));
+}
+
+bool llvm::isTransmitter(const Instruction &I) {
+  auto *V = getTransmittedOperand(I);
+  if (!V || isa<Constant, BasicBlock, InlineAsm>(V))
+    return false;
+  assert((isa<Argument, Instruction>(V)));
+  return true;
 }
 
 static Metadata *getUnsafeMDElt(int ID, LLVMContext &Ctx) {
@@ -410,6 +420,15 @@ static void enumerateDepsImpl(SmallVectorImpl<const Value *> &Todo, LLVMContext 
       continue;
     }
   }
+}
+
+MDNode *unsafe::enumerateArgumentDeps(const CallBase &I, unsigned ArgNo) {
+  LLVMContext &Ctx = I.getContext();
+  SmallVector<Metadata *> IDs;
+  SmallVector<const Value *> Todo;
+  Todo.push_back(I.getArgOperand(ArgNo));
+  enumerateDepsImpl(Todo, Ctx, IDs);
+  return MDNode::get(Ctx, IDs);
 }
 
 MDNode *unsafe::enumerateTransmitterDeps(const Instruction &I) {

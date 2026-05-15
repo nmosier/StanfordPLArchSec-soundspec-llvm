@@ -11,6 +11,7 @@ namespace llvm {
 
 class IntrinsicInst;
 class IRBuilderBase;
+class CallBase;
 
 class UnsafeBuilderScope {
   IRBuilderBase &Builder;
@@ -124,11 +125,14 @@ MDNode *enumerateTransmitterDeps(const Instruction &I);
 // Enumerate direct dependencies of an unsafe scope.
 MDNode *enumerateScopeDeps(int ID, const Function &F);
 
+MDNode *enumerateArgumentDeps(const CallBase &I, unsigned ArgNo);
+
 } // namespace unsafe
 
 bool isSpeculationPrimitive(const Instruction &I);
-Value *isTransmitter(Instruction &I);
-const Value *isTransmitter(const Instruction &I);
+Value *getTransmittedOperand(Instruction &I);
+const Value *getTransmittedOperand(const Instruction &I);
+bool isTransmitter(const Instruction &I);
 
 } // namespace llvm
 
