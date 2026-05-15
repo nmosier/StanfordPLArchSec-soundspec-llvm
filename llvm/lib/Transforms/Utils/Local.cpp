@@ -3138,17 +3138,16 @@ void llvm::copyMetadataForLoad(LoadInst &Dest, const LoadInst &Source) {
       Dest.setMetadata(ID, N);
       break;
 
-#if 0
-    // [soundspec]
+    // [soundspec] Propagate !unsafe metadata from source load onto the
+    // retyped clone. The clone is supposed to be a same-semantics retype
+    // of the source, so the unsafe scope (if any) carries over directly.
     case LLVMContext::MD_unsafe: {
-      // The new instruction shouldn't have a distinct scope.
       MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_unsafe);
-      (void) DestMD;
+      (void)DestMD;
       assert(!(DestMD && DestMD != N) && "Dest already has an unsafe scope!");
       Dest.setMetadata(ID, N);
       break;
     }
-#endif
 
     case LLVMContext::MD_nonnull:
       copyNonnullMetadata(Source, N, Dest);
