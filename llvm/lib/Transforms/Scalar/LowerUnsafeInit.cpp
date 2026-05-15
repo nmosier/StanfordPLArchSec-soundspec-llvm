@@ -33,9 +33,14 @@
 #include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/Analysis/MemoryLocation.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Support/DebugLog.h"
 
 #include <cassert>
 
@@ -91,7 +96,7 @@ static bool accumulateConstantOffset(const Value *Ptr, const AllocaInst *AI,
   if (!GEP->accumulateConstantOffset(DL, MyOffset))
     return false;
 
-  Offset += MyOffset.getLimitedValue();
+  Offset += MyOffset.getLimitedValue() * 8;
   return true;
 }
 
@@ -102,6 +107,7 @@ static OutputIt getInitPointerAndSize(const Instruction &I, const DataLayout &DL
   if (auto *SI = dyn_cast<StoreInst>(&I)) {
     auto Size = DL.getTypeStoreSizeInBits(SI->getValueOperand()->getType());
     auto *Ptr = SI->getPointerOperand();
+    errs() << "store size: " << I << " size=" << Size << "\n";
     *Out++ = std::make_pair(Ptr, Size);
   }
 
@@ -141,6 +147,7 @@ static OutputIt getInitRanges(const Instruction &I, const AllocaInst *AI,
     uint64_t Offset;
     if (!accumulateConstantOffset(Ptr, AI, DL, Offset))
       continue;
+    errs() << "[debug] I=" << I << " offset=" << Offset << " size=" << Size << "\n";
     auto First = Offset;
     auto Last = First + Size;
     *Out++ = std::make_pair(First, Last);
@@ -179,28 +186,69 @@ static ModRefInfo getAllocaModRef(AAResults &AA, const Instruction &I,
 // Returns whether uninitialized alloca was accessed.
 static bool checkAccess(const Instruction &I, AAResults &AA,
                         const AllocaInst *AI, const DataLayout &DL,
-                        const SmallBitVector &BV) {
+                        const SmallBitVector &BV, const DominatorTree &DT) {
   // If the allocation was fully initialized, then all accesses will always be
   // fully initialized.
   if (BV.all())
     return false;
+
+  // Ignore intrinsics that don't actually access memory.
+  if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+    if (II->isAssumeLikeIntrinsic())
+      return false;
+  }
+
+  // [soundspec] Flow-sensitive escape pre-filter: BasicAA's escape walk is
+  // whole-function, so once the alloca is captured anywhere (e.g. via a
+  // later sret call) AA reports may-modref for every may-write op in the
+  // function — including ops that lexically precede the capture point.
+  // PointerMayBeCapturedBefore answers the flow-sensitive question: "is
+  // %a captured on any path reaching I?". If not, the only way I can
+  // touch %a is through a pointer visible in I's own operands; if I has
+  // no such operand, it cannot access %a.
+  if (!PointerMayBeCapturedBefore(AI, /*ReturnCaptures=*/false, &I, &DT)) {
+    for (const Use &U : I.operands()) {
+      Value *V = U.get();
+      if (!V->getType()->isPointerTy())
+        continue;
+      // findAllocaForValue traces back through GEPs (any indices),
+      // casts, phis, selects, and `returned`-attribute calls; returns
+      // the unique alloca if all paths converge.
+      if (findAllocaForValue(V) == AI)
+        return isModOrRefSet(getAllocaModRef(AA, I, AI, DL));
+    }
+    return false;
+  }
 
   // Otherwise, this instruction accessed the uninitialized alloca if
   // it aliases with it per AA.
   return isModOrRefSet(getAllocaModRef(AA, I, AI, DL));
 }
 
-static void identifyInitializationStores(Function &F, AllocaInst *AI, AAResults &AA) {
+static std::string printInitBV(const SmallBitVector &BV) {
+  std::string S;
+  for (auto I = 0; I < BV.size(); ++I)
+    S.push_back(BV[I] ? '1' : '0');
+  return S;
+}
+
+static void identifyInitializationStores(Function &F, AllocaInst *AI,
+                                         AAResults &AA, const DominatorTree &DT) {
   auto &DL = F.getDataLayout();
   auto Size = AI->getAllocationSizeInBits(DL);
   assert(Size && "VLAs are not allowed to have !unsafe.init metadata!");
   using T = P::T;
 
+  LDBG() << "==========\n";
+  LDBG() << "processing alloca: " << *AI;
+
   auto Top = T(*Size, true);
   auto Bot = T(*Size, false);
   DenseMap<BasicBlock *, P> Map;
-  for (auto &B : F)
+  for (auto &B : F) {
     Map[&B].In = Top;
+    Map[&B].Out = Top;
+  }
   Map[&F.getEntryBlock()].In = Bot;
 
   // Compute the initialization at each program point.
@@ -224,26 +272,30 @@ static void identifyInitializationStores(Function &F, AllocaInst *AI, AAResults 
       Changed |= (P.sig() != OldSig);
     }
   } while (Changed);
-
   // STATS: Was this alloca ever fully initialized?
   bool EverFullyInit = llvm::any_of(F, [&Map](auto &B) -> bool {
     return Map[&B].Out.all();
   });
   if (EverFullyInit)
     ++NumAllocasEverFullyInitialized;
+  LDBG() << "alloca is " << (EverFullyInit ? "" : "not ") << "fully initialized: " << *AI;
 
   for (BasicBlock &B : F) {
     auto BV = Map[&B].In;
 
     for (Instruction &I : B) {
       // Check if this instruction accessed uninitialized memory.
-      if (checkAccess(I, AA, AI, DL, BV)) {
+      auto MaybeUninit = checkAccess(I, AA, AI, DL, BV, DT);
+      if (MaybeUninit) {
         // Mark this access as !unsafe.
         auto *MD =
             unsafe::mergeMetadata(I.getMetadata(LLVMContext::MD_unsafe),
                                   AI->getMetadata(LLVMContext::MD_unsafe));
         assert(MD);
         I.setMetadata(LLVMContext::MD_unsafe, MD);
+
+        LDBG() << "may access uninitialized memory: " << I;
+        LDBG() << "initialization state before: " << printInitBV(BV);
 
         ++NumInstsTagged;
         if (I.mayWriteToMemory())
@@ -258,6 +310,9 @@ static void identifyInitializationStores(Function &F, AllocaInst *AI, AAResults 
 
       // Step forward over the instruction.
       transferInstruction(I, AI, DL, BV);
+
+      if (MaybeUninit)
+        LDBG() << "initialization state after: " << printInitBV(BV);
     }
   }
 }
@@ -265,7 +320,9 @@ static void identifyInitializationStores(Function &F, AllocaInst *AI, AAResults 
 /// Process a single function: find allocas with `!unsafe.init`, tag their
 /// init stores, propagate the scope onto the alloca itself, and drop the
 /// `!unsafe.init` marker.
-static bool lowerUnsafeInit(Function &F, AAResults &AA) {
+static bool lowerUnsafeInit(Function &F, AAResults &AA,
+                            const DominatorTree &DT) {
+  LDBG() << "lowerUnsafeInit: handling function " << F.getName();
   for (Instruction &I : llvm::instructions(F)) {
     auto *AI = dyn_cast<AllocaInst>(&I);
     if (!AI)
@@ -281,7 +338,7 @@ static bool lowerUnsafeInit(Function &F, AAResults &AA) {
     AI->setMetadata(LLVMContext::MD_unsafe, MD);
 
     // Identify any initialization stores.
-    identifyInitializationStores(F, AI, AA);
+    identifyInitializationStores(F, AI, AA, DT);
 
     ++NumAllocasLowered;
   }
@@ -294,7 +351,8 @@ static bool lowerUnsafeInit(Function &F, AAResults &AA) {
 PreservedAnalyses LowerUnsafeInitPass::run(Function &F,
                                            FunctionAnalysisManager &AM) {
   AAResults &AA = AM.getResult<AAManager>(F);
-  if (!lowerUnsafeInit(F, AA))
+  DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
+  if (!lowerUnsafeInit(F, AA, DT))
     return PreservedAnalyses::all();
 
   // Only metadata changes; CFG is untouched.
