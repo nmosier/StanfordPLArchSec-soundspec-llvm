@@ -1611,15 +1611,13 @@ def int_unsafe_exit : DefaultAttrsIntrinsic<
     [llvm_i32_ty],
     [IntrInaccessibleMemOnly, IntrConvergent, ImmArg<ArgIndex<0>>]>;
 
-// `llvm.unsafe.dep.<T>(<T> value, i32 imm scope_id)` is a pure
-// identity-passthrough on its first argument (return type matches the
-// first arg's type), like `llvm.unsafe.in`/`llvm.unsafe.out`. The
-// second argument is an immediate scope ID (same `u32` namespace as
-// the other markers).
+// `llvm.unsafe.dep.<T>(<T> value)` is a pure identity-passthrough on
+// its argument (return type matches the arg type). The unsafe-scope
+// list lives on the call's `!unsafe` metadata, not in an arg.
 def int_unsafe_dep : PureIntrinsic<
     [llvm_any_ty],
-    [LLVMMatchType<0>, llvm_i32_ty],
-    [ImmArg<ArgIndex<1>>]>;
+    [LLVMMatchType<0>],
+    []>;
 
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //
