@@ -1,10 +1,10 @@
 #include "llvm/IR/UnsafeScope.h"
 #include "LLVMContextImpl.h"
 
-#include "llvm-c/Core.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -14,6 +14,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/IRBuilder.h"
 #include <iterator>
 #include <optional>
 
@@ -31,6 +32,15 @@ struct MyBasicBlockEdge {
   BasicBlock *getEnd() const { return Dest; }
 };
 
+} // namespace
+
+UnsafeBuilderScope::UnsafeBuilderScope(IRBuilderBase &Builder, MDNode *MD)
+    : Builder(Builder) {
+  Builder.SetUnsafeMetadata(MD);
+}
+
+UnsafeBuilderScope::~UnsafeBuilderScope() {
+  Builder.SetUnsafeMetadata(nullptr);
 }
 
 /// Decode the `i32` scope ID stored as the single operand of an
@@ -306,13 +316,14 @@ static void sortUniqueMetadata(SmallVectorImpl<Metadata *> &MDs) {
 }
 
 MDNode *unsafe::mergeMetadata(MDNode *A, MDNode *B) {
+  if (!A)
+    return B;
+  if (!B)
+    return A;
   SmallVector<Metadata *> MDs;
-  if (A)
-    llvm::copy(A->operands(), std::back_inserter(MDs));
-  if (B)
-    llvm::copy(B->operands(), std::back_inserter(MDs));
-  if (MDs.empty())
-    return nullptr;
+  llvm::copy(A->operands(), std::back_inserter(MDs));
+  llvm::copy(B->operands(), std::back_inserter(MDs));
+  assert(!MDs.empty());
   sortUniqueMetadata(MDs);
   auto &Ctx = cast<ConstantAsMetadata>(MDs.front())->getContext();
   return MDTuple::get(Ctx, MDs);
@@ -326,4 +337,113 @@ MDNode *unsafe::removeID(MDNode *MD, uint64_t ID) {
   sortUniqueMetadata(MDs);
   auto &Ctx = cast<ConstantAsMetadata>(MDs.front())->getContext();
   return MDTuple::get(Ctx, MDs);
+}
+
+bool llvm::isSpeculationPrimitive(const Instruction &I) {
+  // Handle conditional branches.
+  if (auto *BI = dyn_cast<BranchInst>(&I))
+    return BI->isConditional();
+
+  // Handle indirect branches.
+  if (auto *CB = dyn_cast<CallBase>(&I))
+    return CB->isIndirectCall();
+
+  // Handle stores.
+  // TODO: Handle other types of stores?
+  if (isa<StoreInst>(&I))
+    return true;
+
+  return false;
+}
+
+Value *llvm::isTransmitter(Instruction &I) {
+  if (auto *BI = dyn_cast<BranchInst>(&I))
+    return BI->isConditional() ? BI->getCondition() : nullptr;
+
+  if (auto *CB = dyn_cast<CallBase>(&I))
+    return CB->getCalledOperand();
+
+  if (auto *Ptr = getLoadStorePointerOperand(&I))
+    return Ptr;
+
+  return nullptr;
+}
+
+const Value *llvm::isTransmitter(const Instruction &I) {
+  return const_cast<const Value *>(isTransmitter(const_cast<Instruction &>(I)));
+}
+
+static Metadata *getUnsafeMDElt(int ID, LLVMContext &Ctx) {
+  auto *Int32Ty = IntegerType::getInt32Ty(Ctx);
+  auto *C = ConstantInt::get(Int32Ty, ID);
+  auto *CAM = ConstantAsMetadata::get(C);
+  return CAM;
+}
+
+static void enumerateDepsImpl(SmallVectorImpl<const Value *> &Todo, LLVMContext &Ctx, SmallVectorImpl<Metadata *> &IDs) {
+  SmallSet<const Value *, 4> Seen;
+  while (!Todo.empty()) {
+    auto *V = Todo.pop_back_val();
+
+    if (!Seen.insert(V).second)
+      continue;
+
+    // Handle arguments by just returning an abstract unsafe scope
+    // with an ID that's just its negative index.
+    if (auto *A = dyn_cast<Argument>(V)) {
+      auto ID = -static_cast<int>(A->getArgNo());
+      IDs.push_back(getUnsafeMDElt(ID, Ctx));
+      continue;
+    }
+
+    // Handle instructions.
+    if (auto *I = dyn_cast<Instruction>(V)) {
+      // If the instruction is part of an unsafe scope, then add that and stop
+      // exploring.
+      if (auto *MD = I->getMetadata(LLVMContext::MD_unsafe)) {
+        llvm::copy(MD->operands(), std::back_inserter(IDs));
+        continue;
+      }
+
+      // Otherwise, add all operands.
+      llvm::copy(I->operands(), std::back_inserter(Todo));
+      continue;
+    }
+  }
+}
+
+MDNode *unsafe::enumerateTransmitterDeps(const Instruction &I) {
+  LLVMContext &Ctx = I.getContext();
+  SmallVector<Metadata *> IDs;
+
+  SmallVector<const Value *> Todo;
+  llvm::copy(I.operands(), std::back_inserter(Todo));
+  enumerateDepsImpl(Todo, Ctx, IDs);
+
+  if (auto *MD = I.getMetadata(LLVMContext::MD_unsafe))
+    llvm::copy(MD->operands(), std::back_inserter(IDs));
+
+  sortUniqueMetadata(IDs);
+  return MDNode::get(Ctx, IDs);
+}
+
+MDNode *unsafe::enumerateScopeDeps(int ID, const Function &F) {
+  LLVMContext &Ctx = F.getContext();
+
+  // Get a `Metadata *` for the ID, so we can do quick pointer comparisons.
+  Metadata *IDMD = getUnsafeMDElt(ID, Ctx);
+
+  // Collect all instructions with !unsafe tag containing ID.
+  SmallVector<const Value *> Todo;
+  SmallVector<Metadata *> IDs;
+  for (const Instruction &I : llvm::instructions(F)) {
+    auto *MD = I.getMetadata(LLVMContext::MD_unsafe);
+    if (!MD || !llvm::is_contained(MD->operands(), IDMD))
+      continue;
+    llvm::copy(I.operands(), std::back_inserter(Todo));
+  }
+  enumerateDepsImpl(Todo, Ctx, IDs);
+
+  sortUniqueMetadata(IDs);
+  return MDNode::get(Ctx, IDs);
 }

@@ -2,8 +2,6 @@
 #define LLVM_IR_UNSAFESCOPE_H
 
 #include "llvm/IR/CFG.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/ADT/SmallSet.h"
@@ -12,21 +10,17 @@
 namespace llvm {
 
 class IntrinsicInst;
+class IRBuilderBase;
 
 class UnsafeBuilderScope {
   IRBuilderBase &Builder;
 
 public:
-  UnsafeBuilderScope(IRBuilderBase &Builder, MDNode *UnsafeScopeMD)
-      : Builder(Builder) {
-    Builder.SetUnsafeMetadata(UnsafeScopeMD);
-  }
+  UnsafeBuilderScope(IRBuilderBase &Builder, MDNode *UnsafeScopeMD);
   UnsafeBuilderScope(IRBuilderBase &Builder, const Instruction &I)
       : UnsafeBuilderScope(Builder, I.getMetadata(LLVMContext::MD_unsafe)) {}
 
-  ~UnsafeBuilderScope() {
-    Builder.SetUnsafeMetadata(nullptr);
-  }
+  ~UnsafeBuilderScope();
 };
 
 inline Instruction &removeUnsafeScope(Instruction &I) {
@@ -122,7 +116,19 @@ MDNode *mergeMetadata(MDNode *A, MDNode *B);
 // This function returns null if the resulting unsafe scope ID set is empty.
 MDNode *removeID(MDNode *MD, uint64_t ID);
 
-}
+// Enumerate direct dependencies of a specific value.
+// If the value is an instruction with !unsafe metadata,
+// then we return simply that metadata.
+MDNode *enumerateTransmitterDeps(const Instruction &I);
+
+// Enumerate direct dependencies of an unsafe scope.
+MDNode *enumerateScopeDeps(int ID, const Function &F);
+
+} // namespace unsafe
+
+bool isSpeculationPrimitive(const Instruction &I);
+Value *isTransmitter(Instruction &I);
+const Value *isTransmitter(const Instruction &I);
 
 } // namespace llvm
 
