@@ -12,6 +12,7 @@ namespace llvm {
 class IntrinsicInst;
 class IRBuilderBase;
 class CallBase;
+class Loop;
 
 class UnsafeBuilderScope {
   IRBuilderBase &Builder;
@@ -60,17 +61,8 @@ inline MDNode *getUnsafeScope(const Instruction &I) {
 std::optional<uint64_t> getUnsafeScopeID(const MDNode *MD);
 std::optional<uint64_t> getUnsafeScopeID(const Instruction &I);
 
-// TODO: Remove these in favor of `isUnsafeScopeIntr`?
-bool isUnsafeScopeEnter(const Instruction &I, uint64_t *ID = nullptr);
-bool isUnsafeScopeEnter(const Instruction &I, uint64_t ID);
-bool isUnsafeScopeExit(const Instruction &I, uint64_t *ID = nullptr);
-bool isUnsafeScopeExit(const Instruction &I, uint64_t ID);
-bool isUnsafeScopeEnterOrExit(const Instruction &I, uint64_t *ID = nullptr);
-
-bool isUnsafeScopeIn(const Instruction &I, uint64_t *ID = nullptr);
-bool isUnsafeScopeOut(const Instruction &I, uint64_t *ID = nullptr);
-
 // TODO: Should reorder 2nd and 3rd arguments.
+// TODO: Remove this junk.
 bool isUnsafeScopeIntr(const Instruction &I, uint64_t UnsafeScopeID,
                        Intrinsic::ID IID);
 bool isUnsafeScopeIntr(const Instruction &I, uint64_t *ID, Intrinsic::ID IID);
@@ -101,10 +93,6 @@ OutputIt insertPredecessors(Instruction *I, OutputIt Out) {
   return Out;
 }
 
-SmallSet<Instruction *, 4> getUnsafeScopeInsts(Function &F, uint64_t ID);
-
-void dumpUnsafeScope(const Function &F, uint64_t ID);
-
 std::optional<uint64_t> getValueUnsafeScope(const Value *V);
 
 namespace unsafe {
@@ -126,6 +114,8 @@ MDNode *enumerateTransmitterDeps(const Instruction &I);
 MDNode *enumerateScopeDeps(int ID, const Function &F);
 
 MDNode *enumerateArgumentDeps(const CallBase &I, unsigned ArgNo);
+
+MDNode *loopMetadata(const Loop &L);
 
 } // namespace unsafe
 

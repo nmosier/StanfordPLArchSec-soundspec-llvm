@@ -16,6 +16,9 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include <iterator>
 #include <cassert>
 #include <optional>
@@ -92,10 +95,6 @@ bool llvm::isUnsafeScopeIntr(const Instruction &I, uint64_t *ID,
   return true;  
 }
 
-bool llvm::isUnsafeScopeEnter(const Instruction &I, uint64_t *ID) {
-  return isUnsafeScopeIntr(I, ID, Intrinsic::unsafe_enter);
-}
-
 bool llvm::isUnsafeScopeIntr(const Instruction &I, uint64_t UnsafeScopeID,
                                    Intrinsic::ID IID) {
   const auto *II = dyn_cast<IntrinsicInst>(&I);
@@ -103,41 +102,6 @@ bool llvm::isUnsafeScopeIntr(const Instruction &I, uint64_t UnsafeScopeID,
     return false;
   auto ScopeIdx = II->arg_size() - 1;
   return cast<ConstantInt>(II->getArgOperand(ScopeIdx))->getLimitedValue() == UnsafeScopeID;
-}
-
-bool llvm::isUnsafeScopeEnter(const Instruction &I, uint64_t ID) {
-  return isUnsafeScopeIntr(I, ID, Intrinsic::unsafe_enter);
-}
-
-bool llvm::isUnsafeScopeExit(const Instruction &I, uint64_t *ID) {
-  return isUnsafeScopeIntr(I, ID, Intrinsic::unsafe_exit);
-}
-
-bool llvm::isUnsafeScopeExit(const Instruction &I, uint64_t ID) {
-  return isUnsafeScopeIntr(I, ID, Intrinsic::unsafe_exit);
-}
-
-bool llvm::isUnsafeScopeEnterOrExit(const Instruction &I, uint64_t *ID) {
-  auto *II = dyn_cast<IntrinsicInst>(&I);
-  if (!II)
-    return false;
-  switch (II->getIntrinsicID()) {
-  default:
-    return false;
-  case Intrinsic::unsafe_enter:
-  case Intrinsic::unsafe_exit:
-    if (ID)
-      *ID = cast<ConstantInt>(II->getArgOperand(0))->getLimitedValue();
-    return true;
-  }
-}
-
-bool llvm::isUnsafeScopeIn(const Instruction &I, uint64_t *ID) {
-  return isUnsafeScopeIntr(I, ID, Intrinsic::unsafe_in);
-}
-
-bool llvm::isUnsafeScopeOut(const Instruction &I, uint64_t *ID) {
-  return isUnsafeScopeIntr(I, ID, Intrinsic::unsafe_out);
 }
 
 bool llvm::isUnsafeScopeIntr(const Instruction &I,
@@ -175,107 +139,6 @@ bool unsafe::isReturnLike(const Instruction &I) {
     return true;
   auto *B = I.getParent();
   return llvm::succ_empty(B);
-}
-
-static auto computeControlScope(Function &F, uint64_t ID) {
-  SmallSet<Instruction *, 4> Insts;
-  for (Instruction &I : instructions(F))
-    if (auto MyID = getUnsafeScopeID(I.getMetadata(LLVMContext::MD_unsafe));
-        MyID == ID)
-      Insts.insert(&I);
-  return Insts;
-}
-
-static auto computeDataScope(Function &F, uint64_t ID) {
-  using namespace llvm::PatternMatch;
-
-  SmallVector<Instruction *> Todo;
-  SmallSet<Instruction *, 4> Seen;
-
-  // Forward.
-  for (Instruction &I : llvm::instructions(F))
-    if (match(&I,
-              m_Intrinsic<Intrinsic::unsafe_in>(m_Value(), m_SpecificInt(ID))))
-      Todo.push_back(&I);
-  while (!Todo.empty()) {
-    auto *I = Todo.pop_back_val();
-
-    // If this has !unsafe metadata, skip.
-    if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe));
-        MyID == ID)
-      continue;
-
-    // If we've seen it already, skip.
-    if (!Seen.insert(I).second)
-      continue;
-
-    // If this is llvm.unsafe.out, we're done.
-    if (match(I,
-              m_Intrinsic<Intrinsic::unsafe_out>(m_Value(), m_SpecificInt(ID))))
-      continue;
-
-    // Add consumers.
-    for (User *U : I->users())
-      Todo.push_back(cast<Instruction>(U));
-  }
-
-  // Backward.
-  for (Instruction &I : llvm::instructions(F))
-    if (match(&I,
-              m_Intrinsic<Intrinsic::unsafe_out>(m_Value(), m_SpecificInt(ID))))
-      Todo.push_back(&I);
-  while (!Todo.empty()) {
-    auto *I = Todo.pop_back_val();
-
-    // If this has !unsafe metadata, skip.
-    if (auto MyID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe));
-        MyID == ID)
-      continue;
-
-    // If we've seen it already, skip.
-    if (!Seen.insert(I).second)
-      continue;
-
-    // If this is llvm.unsafe.in, we're done.
-    if (match(I,
-              m_Intrinsic<Intrinsic::unsafe_in>(m_Value(), m_SpecificInt(ID))))
-      continue;
-
-    // Add producers.
-    for (Value *V : I->operands())
-      if (auto *I = dyn_cast<Instruction>(V))
-        Todo.push_back(I);
-  }
-
-  return Seen;
-}
-
-static bool isValidUnsafeScopeInst(const Instruction *I) {
-  auto *II = dyn_cast<IntrinsicInst>(I);
-  if (II && II->isAssumeLikeIntrinsic())
-    return false;
-  if (isa<AllocaInst>(I))
-    return false;
-  return true;
-}
-
-SmallSet<Instruction *, 4> llvm::getUnsafeScopeInsts(Function &F, uint64_t ID) {
-  auto ControlScope = computeControlScope(F, ID);
-  auto DataScope = computeDataScope(F, ID);
-  SmallSet<Instruction *, 4> Result;
-
-  llvm::copy_if(ControlScope, std::inserter(Result, Result.end()), isValidUnsafeScopeInst);
-  llvm::copy_if(DataScope, std::inserter(Result, Result.end()), isValidUnsafeScopeInst);
-
-  return Result;
-}
-
-void llvm::dumpUnsafeScope(const Function &F, uint64_t ID) {
-  auto Insts = getUnsafeScopeInsts(const_cast<Function &>(F), ID);
-  errs() << "unsafe scope for " << ID << ": [\n";
-  for (auto *I : Insts)
-    errs() << "    " << *I << "\n";
-  errs() << "]\n";
 }
 
 static std::optional<uint64_t>
@@ -325,9 +188,8 @@ MDNode *unsafe::mergeMetadata(MDNode *A, MDNode *B) {
   SmallVector<Metadata *> MDs;
   llvm::copy(A->operands(), std::back_inserter(MDs));
   llvm::copy(B->operands(), std::back_inserter(MDs));
-  assert(!MDs.empty());
   sortUniqueMetadata(MDs);
-  auto &Ctx = cast<ConstantAsMetadata>(MDs.front())->getContext();
+  auto &Ctx = A ? A->getContext() : B->getContext();
   return MDTuple::get(Ctx, MDs);
 }
 
@@ -337,28 +199,71 @@ MDNode *unsafe::removeID(MDNode *MD, uint64_t ID) {
   SmallVector<Metadata *> MDs;
   llvm::copy(MD->operands(), std::back_inserter(MDs));
   sortUniqueMetadata(MDs);
-  auto &Ctx = cast<ConstantAsMetadata>(MDs.front())->getContext();
+  auto &Ctx = MD->getContext();
   return MDTuple::get(Ctx, MDs);
 }
 
+static bool isTerminatorSpeculationPrimitive(const Instruction &I) {
+  switch (I.getOpcode()) {
+    
+// catchret, cleanupret, resume, catchswitch
+
+  }
+}
+
 bool llvm::isSpeculationPrimitive(const Instruction &I) {
-  // Handle conditional branches.
-  if (auto *BI = dyn_cast<BranchInst>(&I))
-    return BI->isConditional();
+  if (isa<BinaryOperator, UnaryOperator, CastInst, CmpInst>(&I))
+    return false;
 
-  // Handle indirect branches.
-  if (auto *CB = dyn_cast<CallBase>(&I))
-    return CB->isIndirectCall();
+  switch (I.getOpcode()) {
+  case Instruction::Br:
+    return cast<BranchInst>(I).isConditional();
 
-  // Handle stores.
-  // TODO: Handle other types of stores?
-  if (isa<StoreInst>(&I))
+  case Instruction::Switch:
+  case Instruction::IndirectBr:
+  case Instruction::Store:
     return true;
 
-  return false;
+  case Instruction::CallBr:
+    return cast<CallBrInst>(I).getNumIndirectDests() > 0;
+
+  case Instruction::Invoke:
+  case Instruction::Call:
+    return cast<CallBase>(I).isIndirectCall();
+
+  case Instruction::Unreachable:
+  case Instruction::Ret:
+  case Instruction::Load:
+  case Instruction::GetElementPtr:
+  case Instruction::Alloca:
+  case Instruction::Freeze:
+  case Instruction::ExtractValue:
+  case Instruction::VAArg:
+  case Instruction::LandingPad:
+  case Instruction::InsertElement:
+  case Instruction::InsertValue:
+  case Instruction::PHI:
+  case Instruction::Resume: // TODO: Is this actually possibly a speculation
+                            // primitive, since it might compile down to an
+                            // indirect branch? Could always disable speculation
+                            // for the branch, since this should be very rare.
+  case Instruction::AtomicCmpXchg:
+  case Instruction::AtomicRMW:
+  case Instruction::ExtractElement:
+  case Instruction::Select:
+  case Instruction::Fence:
+  case Instruction::ShuffleVector:
+    return false;
+
+  default: {
+    auto Msg = formatv("{}: unhandled instruction: {}", __func__, I);
+    report_fatal_error(Msg);
+  }
+  }
 }
 
 Value *llvm::getTransmittedOperand(Instruction &I) {
+  // TODO: Should do switch on opcode?
   if (auto *BI = dyn_cast<BranchInst>(&I))
     return BI->isConditional() ? BI->getCondition() : nullptr;
 
@@ -375,12 +280,27 @@ const Value *llvm::getTransmittedOperand(const Instruction &I) {
   return const_cast<const Value *>(getTransmittedOperand(const_cast<Instruction &>(I)));
 }
 
+static bool isValueConstantPHI(const Value *V) {
+  SmallVector<const Value *> Todo;
+  SmallSet<const Value *, 4> Seen;
+  Todo.push_back(V);
+  while (!Todo.empty()) {
+    auto *V = Todo.pop_back_val();
+    if (!Seen.insert(V).second)
+      continue;
+    if (isa<Constant, BasicBlock, InlineAsm>(V))
+      continue;
+    auto *Phi = dyn_cast<PHINode>(V);
+    if (!Phi)
+      return false;
+    llvm::copy(Phi->incoming_values(), std::back_inserter(Todo));
+  }
+  return true;
+}
+
 bool llvm::isTransmitter(const Instruction &I) {
   auto *V = getTransmittedOperand(I);
-  if (!V || isa<Constant, BasicBlock, InlineAsm>(V))
-    return false;
-  assert((isa<Argument, Instruction>(V)));
-  return true;
+  return V && !isValueConstantPHI(V);
 }
 
 static Metadata *getUnsafeMDElt(int ID, LLVMContext &Ctx) {
@@ -465,4 +385,20 @@ MDNode *unsafe::enumerateScopeDeps(int ID, const Function &F) {
 
   sortUniqueMetadata(IDs);
   return MDNode::get(Ctx, IDs);
+}
+
+static MDNode *blockMetadata(const BasicBlock &B) {
+  auto &Ctx = B.getContext();
+  MDNode *MD = MDNode::get(Ctx, {});
+  for (const Instruction &I : B)
+    MD = unsafe::mergeMetadata(MD, I.getMetadata(LLVMContext::MD_unsafe));
+  return MD->getNumOperands() ? MD : nullptr;
+}
+
+MDNode *unsafe::loopMetadata(const Loop &L) {
+  auto &Ctx = (*L.block_begin())->getContext();
+  MDNode *MD = MDNode::get(Ctx, {});
+  for (auto *B : L.getBlocks())
+    MD = mergeMetadata(MD, blockMetadata(*B));
+  return MD->getNumOperands() ? MD : nullptr;
 }
