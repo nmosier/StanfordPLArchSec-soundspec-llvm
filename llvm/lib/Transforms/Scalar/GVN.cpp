@@ -1178,7 +1178,12 @@ Value *AvailableValue::MaterializeAdjustedValue(LoadInst *Load,
         CoercedLoad->dropUnknownNonDebugMetadata(
             {LLVMContext::MD_dereferenceable,
              LLVMContext::MD_dereferenceable_or_null,
-             LLVMContext::MD_invariant_load, LLVMContext::MD_invariant_group});
+             LLVMContext::MD_invariant_load, LLVMContext::MD_invariant_group,
+             // [soundspec] Scope tags are instruction-identity, not type-
+             // dependent. The coerced load is still the same speculative
+             // event in the same scope as the original wider load.
+             LLVMContext::MD_safe, LLVMContext::MD_unsafe,
+             LLVMContext::MD_unsafe_xmit, LLVMContext::MD_unsafe_spec});
       LLVM_DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset
                         << "  " << *getCoercedLoadValue() << '\n'
                         << *Res << '\n'
@@ -1594,6 +1599,15 @@ void GVNPass::eliminatePartiallyRedundantLoad(
       NewLoad->setMetadata(LLVMContext::MD_invariant_group, InvGroupMD);
     if (auto *RangeMD = Load->getMetadata(LLVMContext::MD_range))
       NewLoad->setMetadata(LLVMContext::MD_range, RangeMD);
+
+    // [soundspec] PRE-hoisted load is a duplicated transmitter — copy the
+    // original load's scope tags so the verifier accepts it.
+    for (unsigned Kind :
+         {(unsigned)LLVMContext::MD_safe, (unsigned)LLVMContext::MD_unsafe,
+          (unsigned)LLVMContext::MD_unsafe_xmit,
+          (unsigned)LLVMContext::MD_unsafe_spec})
+      if (auto *MD = Load->getMetadata(Kind))
+        NewLoad->setMetadata(Kind, MD);
     if (auto *AccessMD = Load->getMetadata(LLVMContext::MD_access_group))
       if (LI->getLoopFor(Load->getParent()) == LI->getLoopFor(UnavailableBlock))
         NewLoad->setMetadata(LLVMContext::MD_access_group, AccessMD);
