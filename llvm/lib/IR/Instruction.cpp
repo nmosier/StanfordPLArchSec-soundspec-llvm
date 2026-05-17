@@ -569,9 +569,19 @@ void Instruction::dropUBImplyingAttrsAndMetadata(ArrayRef<unsigned> Keep) {
   // !range, !nonnull and !align produce poison, so they are safe to speculate.
   // !noundef and various AA metadata must be dropped, as it generally produces
   // immediate undefined behavior.
+  // [soundspec] !safe, !unsafe, !unsafe.init, !unsafe.xmit, !unsafe.spec are
+  // per-instruction scope tags. They label the instruction's identity for
+  // speculation analysis and don't imply UB themselves, so they are safe to
+  // keep when an instruction is hoisted out of a conditional region.
+  // Note: MD_prof must remain at the end so the `drop_end(KnownIDs)` below
+  // (used when ProfcheckDisableMetadataFixes is set) drops only MD_prof.
   static const unsigned KnownIDs[] = {
       LLVMContext::MD_annotation, LLVMContext::MD_range,
-      LLVMContext::MD_nonnull, LLVMContext::MD_align, LLVMContext::MD_prof};
+      LLVMContext::MD_nonnull, LLVMContext::MD_align,
+      LLVMContext::MD_safe, LLVMContext::MD_unsafe,
+      LLVMContext::MD_unsafe_init, LLVMContext::MD_unsafe_xmit,
+      LLVMContext::MD_unsafe_spec,
+      LLVMContext::MD_prof};
   SmallVector<unsigned> KeepIDs;
   KeepIDs.reserve(Keep.size() + std::size(KnownIDs));
   append_range(KeepIDs, (!ProfcheckDisableMetadataFixes ? KnownIDs
