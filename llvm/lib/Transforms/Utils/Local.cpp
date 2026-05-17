@@ -317,6 +317,13 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
       BranchInst *NewBr = Builder.CreateCondBr(Cond,
                                                FirstCase.getCaseSuccessor(),
                                                SI->getDefaultDest());
+
+      // [soundspec] The new conditional branch is a speculation primitive
+      // that inherits its scope from the switch it replaces.
+      if (MDNode *MD = SI->getMetadata(LLVMContext::MD_safe))
+        NewBr->setMetadata(LLVMContext::MD_safe, MD);
+      if (MDNode *MD = SI->getMetadata(LLVMContext::MD_unsafe))
+        NewBr->setMetadata(LLVMContext::MD_unsafe, MD);
       SmallVector<uint32_t> Weights;
       if (extractBranchWeights(*SI, Weights) && Weights.size() == 2) {
         uint32_t DefWeight = Weights[0];
