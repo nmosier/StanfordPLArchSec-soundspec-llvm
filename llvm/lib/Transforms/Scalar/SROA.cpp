@@ -3386,8 +3386,12 @@ private:
     LoadInst *Load = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
                                            NewAI.getAlign(), "load");
 
+    // [soundspec] Propagate !safe + !unsafe.xmit from the original load
+    // onto the split version.
     Load->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
-                            LLVMContext::MD_access_group});
+                            LLVMContext::MD_access_group,
+                            LLVMContext::MD_safe,
+                            LLVMContext::MD_unsafe_xmit});
     return extractVector(IRB, Load, BeginIndex, EndIndex, "vec");
   }
 
@@ -3489,11 +3493,13 @@ private:
 
       if (LI.isVolatile())
         NewLI->setAtomic(LI.getOrdering(), LI.getSyncScopeID());
-      // [soundspec] include MD_unsafe so the new load inherits the
-      // original load's scope tag.
+      // [soundspec] include MD_safe + MD_unsafe + MD_unsafe_xmit so the
+      // new load inherits the original load's scope tags.
       NewLI->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
                                LLVMContext::MD_access_group,
-                               LLVMContext::MD_unsafe});
+                               LLVMContext::MD_safe,
+                               LLVMContext::MD_unsafe,
+                               LLVMContext::MD_unsafe_xmit});
 
       V = NewLI;
       IsPtrAdjusted = true;
@@ -3573,8 +3579,13 @@ private:
       V = insertVector(IRB, Old, V, BeginIndex, "vec");
     }
     StoreInst *Store = IRB.CreateAlignedStore(V, &NewAI, NewAI.getAlign());
+    // [soundspec] Propagate !safe + !unsafe.xmit + !unsafe.spec from
+    // the original store onto the split version.
     Store->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
-                             LLVMContext::MD_access_group});
+                             LLVMContext::MD_access_group,
+                             LLVMContext::MD_safe,
+                             LLVMContext::MD_unsafe_xmit,
+                             LLVMContext::MD_unsafe_spec});
     if (AATags)
       Store->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   V->getType(), DL));
@@ -3606,8 +3617,13 @@ private:
     }
     V = convertValue(DL, IRB, V, NewAllocaTy);
     StoreInst *Store = IRB.CreateAlignedStore(V, &NewAI, NewAI.getAlign());
+    // [soundspec] Propagate !safe + !unsafe.xmit + !unsafe.spec from
+    // the original store onto the split version.
     Store->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
-                             LLVMContext::MD_access_group});
+                             LLVMContext::MD_access_group,
+                             LLVMContext::MD_safe,
+                             LLVMContext::MD_unsafe_xmit,
+                             LLVMContext::MD_unsafe_spec});
     if (AATags)
       Store->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   V->getType(), DL));
@@ -3668,11 +3684,15 @@ private:
       NewSI =
           IRB.CreateAlignedStore(V, NewPtr, getSliceAlign(), SI.isVolatile());
     }
-    // [soundspec] include MD_unsafe so the new store inherits the
-    // original store's scope tag.
+    // [soundspec] include MD_safe + MD_unsafe + MD_unsafe_xmit
+    // + MD_unsafe_spec so the new store inherits all of the original
+    // store's scope tags.
     NewSI->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
                              LLVMContext::MD_access_group,
-                             LLVMContext::MD_unsafe});
+                             LLVMContext::MD_safe,
+                             LLVMContext::MD_unsafe,
+                             LLVMContext::MD_unsafe_xmit,
+                             LLVMContext::MD_unsafe_spec});
     if (AATags)
       NewSI->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   V->getType(), DL));
@@ -3780,8 +3800,8 @@ private:
       MemIntrinsic *New = cast<MemIntrinsic>(IRB.CreateMemSet(
           getNewAllocaSlicePtr(IRB, OldPtr->getType()), II.getValue(), Size,
           MaybeAlign(getSliceAlign()), II.isVolatile()));
-      // [soundspec] propagate !unsafe from the original memset call.
-      New->copyMetadata(II, {LLVMContext::MD_unsafe});
+      // [soundspec] propagate !safe + !unsafe from the original memset call.
+      New->copyMetadata(II, {LLVMContext::MD_safe, LLVMContext::MD_unsafe});
       if (AATags)
         New->setAAMetadata(
             AATags.adjustForAccess(NewBeginOffset - BeginOffset, Sz));
@@ -3869,10 +3889,11 @@ private:
     Value *NewPtr = getPtrToNewAI(II.getDestAddressSpace(), II.isVolatile());
     StoreInst *New =
         IRB.CreateAlignedStore(V, NewPtr, NewAI.getAlign(), II.isVolatile());
-    // [soundspec] propagate !unsafe from the original memset call onto the
-    // synthesized store that replaces it.
+    // [soundspec] propagate !safe + !unsafe from the original memset call
+    // onto the synthesized store that replaces it.
     New->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
                            LLVMContext::MD_access_group,
+                           LLVMContext::MD_safe,
                            LLVMContext::MD_unsafe});
     if (AATags)
       New->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
@@ -4003,9 +4024,9 @@ private:
       }
       CallInst *New = IRB.CreateMemCpy(DestPtr, DestAlign, SrcPtr, SrcAlign,
                                        Size, II.isVolatile());
-      // [soundspec] propagate !unsafe from the original memcpy/memmove
-      // onto the slice-restricted replacement call.
-      New->copyMetadata(II, {LLVMContext::MD_unsafe});
+      // [soundspec] propagate !safe + !unsafe from the original
+      // memcpy/memmove onto the slice-restricted replacement call.
+      New->copyMetadata(II, {LLVMContext::MD_safe, LLVMContext::MD_unsafe});
       if (AATags)
         New->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
 
@@ -4088,9 +4109,10 @@ private:
     } else {
       LoadInst *Load = IRB.CreateAlignedLoad(OtherTy, SrcPtr, SrcAlign,
                                              II.isVolatile(), "copyload");
-      // [soundspec] propagate !unsafe from the original mem transfer.
+      // [soundspec] propagate !safe + !unsafe from the original mem transfer.
       Load->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
                               LLVMContext::MD_access_group,
+                              LLVMContext::MD_safe,
                               LLVMContext::MD_unsafe});
       if (AATags)
         Load->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
@@ -4123,9 +4145,10 @@ private:
 
     StoreInst *Store = cast<StoreInst>(
         IRB.CreateAlignedStore(Src, DstPtr, DstAlign, II.isVolatile()));
-    // [soundspec] propagate !unsafe from the original mem transfer.
+    // [soundspec] propagate !safe + !unsafe from the original mem transfer.
     Store->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
                              LLVMContext::MD_access_group,
+                             LLVMContext::MD_safe,
                              LLVMContext::MD_unsafe});
     if (AATags)
       Store->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
@@ -5208,10 +5231,12 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                          PartPtrTy, BasePtr->getName() + "."),
           getAdjustedAlignment(LI, PartOffset),
           /*IsVolatile*/ false, LI->getName());
-      // [soundspec] propagate !unsafe onto each presplit partial load.
+      // [soundspec] propagate !unsafe + !unsafe.xmit onto each presplit
+      // partial load.
       PLoad->copyMetadata(*LI, {LLVMContext::MD_mem_parallel_loop_access,
                                 LLVMContext::MD_access_group,
-                                LLVMContext::MD_unsafe});
+                                LLVMContext::MD_unsafe,
+                                LLVMContext::MD_unsafe_xmit});
 
       // Append this load onto the list of split loads so we can find it later
       // to rewrite the stores.
@@ -5268,11 +5293,14 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            PartPtrTy, StoreBasePtr->getName() + "."),
             getAdjustedAlignment(SI, PartOffset),
             /*IsVolatile*/ false);
-        // [soundspec] propagate !unsafe onto each presplit partial store.
+        // [soundspec] propagate !unsafe + !unsafe.xmit + !unsafe.spec
+        // onto each presplit partial store.
         PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
                                    LLVMContext::MD_access_group,
                                    LLVMContext::MD_DIAssignID,
-                                   LLVMContext::MD_unsafe});
+                                   LLVMContext::MD_unsafe,
+                                   LLVMContext::MD_unsafe_xmit,
+                                   LLVMContext::MD_unsafe_spec});
 
         if (AATags)
           PStore->setAAMetadata(
@@ -5361,11 +5389,12 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            LoadPartPtrTy, LoadBasePtr->getName() + "."),
             getAdjustedAlignment(LI, PartOffset),
             /*IsVolatile*/ false, LI->getName());
-        // [soundspec] propagate !unsafe onto each presplit partial load
-        // in the deferred-store case.
+        // [soundspec] propagate !unsafe + !unsafe.xmit onto each
+        // presplit partial load in the deferred-store case.
         PLoad->copyMetadata(*LI, {LLVMContext::MD_mem_parallel_loop_access,
                                   LLVMContext::MD_access_group,
-                                  LLVMContext::MD_unsafe});
+                                  LLVMContext::MD_unsafe,
+                                  LLVMContext::MD_unsafe_xmit});
       }
 
       // And store this partition.
@@ -5378,11 +5407,13 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                          StorePartPtrTy, StoreBasePtr->getName() + "."),
           getAdjustedAlignment(SI, PartOffset),
           /*IsVolatile*/ false);
-      // [soundspec] propagate !unsafe onto each presplit partial store
-      // in the deferred-store case.
+      // [soundspec] propagate !unsafe + !unsafe.xmit + !unsafe.spec
+      // onto each presplit partial store in the deferred-store case.
       PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
                                  LLVMContext::MD_access_group,
-                                 LLVMContext::MD_unsafe});
+                                 LLVMContext::MD_unsafe,
+                                 LLVMContext::MD_unsafe_xmit,
+                                 LLVMContext::MD_unsafe_spec});
 
       // Now build a new slice for the alloca.
       // ProtectedFieldDisc==nullptr is a lie, but it doesn't matter because we
@@ -5594,13 +5625,6 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
         AI.getIterator());
     // Copy the old AI debug location over to the new one.
     NewAI->setDebugLoc(AI.getDebugLoc());
-    // [soundspec] Propagate !unsafe.init and !unsafe from the aggregate
-    // alloca onto each split sub-alloca so the per-field allocas carry
-    // the same scope metadata as the original.
-    if (MDNode *InitMD = AI.getMetadata(LLVMContext::MD_unsafe_init))
-      NewAI->setMetadata(LLVMContext::MD_unsafe_init, InitMD);
-    if (MDNode *UnsafeMD = AI.getMetadata(LLVMContext::MD_unsafe))
-      NewAI->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
     ++NumNewAllocas;
   }
 
