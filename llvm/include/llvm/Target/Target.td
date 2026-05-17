@@ -1434,6 +1434,16 @@ def UNSAFE_OUT : StandardPseudoInstruction {
   let Constraints = "$src = $dst";
   let isMeta = true;
 }
+// UNSAFE_DEP: passthrough identity like UNSAFE_IN/OUT, but the scope id is
+// carried on `!unsafe` metadata rather than as an explicit operand.
+def UNSAFE_DEP : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let AsmString = "";
+  let hasSideEffects = false;
+  let Constraints = "$src = $dst";
+  let isMeta = true;
+}
 
 def STACKMAP : StandardPseudoInstruction {
   let OutOperandList = (outs);
