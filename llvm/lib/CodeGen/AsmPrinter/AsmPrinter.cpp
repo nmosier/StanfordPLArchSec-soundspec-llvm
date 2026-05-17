@@ -2134,9 +2134,10 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::UNSAFE_EXIT:
       case TargetOpcode::UNSAFE_IN:
       case TargetOpcode::UNSAFE_OUT:
+      case TargetOpcode::UNSAFE_DEP:
         // SoundSpec scope-region markers: purely meta. Stripped at
-        // AsmPrinter (emit nothing). For UNSAFE_IN/UNSAFE_OUT the
-        // `Constraints = "$src = $dst"` tie at the .td level means
+        // AsmPrinter (emit nothing). For UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP
+        // the `Constraints = "$src = $dst"` tie at the .td level means
         // input and output share a physical register, so dropping
         // them does not perturb register assignment.
         if (isVerbose()) {
@@ -2152,6 +2153,9 @@ void AsmPrinter::emitFunctionBody() {
             break;
           case TargetOpcode::UNSAFE_OUT:
             OutStreamer->emitRawComment("UNSAFE_OUT");
+            break;
+          case TargetOpcode::UNSAFE_DEP:
+            OutStreamer->emitRawComment("UNSAFE_DEP");
             break;
           }
         }
