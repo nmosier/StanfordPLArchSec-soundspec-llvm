@@ -2641,6 +2641,13 @@ BasicBlock *llvm::changeToInvokeAndSplitBasicBlock(CallInst *CI,
   II->setCallingConv(CI->getCallingConv());
   II->setAttributes(CI->getAttributes());
   II->setMetadata(LLVMContext::MD_prof, CI->getMetadata(LLVMContext::MD_prof));
+  // [soundspec] The invoke replaces CI semantically; carry over the
+  // speculation-scope metadata so the new call site stays verifier-clean.
+  II->copyMetadata(*CI, {LLVMContext::MD_safe,
+                         LLVMContext::MD_unsafe,
+                         LLVMContext::MD_unsafe_init,
+                         LLVMContext::MD_unsafe_xmit,
+                         LLVMContext::MD_unsafe_spec});
 
   if (DTU)
     DTU->applyUpdates({{DominatorTree::Insert, BB, UnwindEdge}});
