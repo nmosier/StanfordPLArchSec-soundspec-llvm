@@ -130,13 +130,14 @@ HANDLE_TARGET_OPCODE(LIFETIME_START)
 HANDLE_TARGET_OPCODE(LIFETIME_END)
 
 /// SoundSpec scope-region markers. UNSAFE_ENTER/EXIT take an `i32imm` scope
-/// id and have side effects (must survive DCE). UNSAFE_IN/UNSAFE_OUT take an
-/// arbitrary value plus an `i32imm` scope id; output register is tied to
-/// input via Constraints, so AsmPrinter strips them with no codegen change.
+/// id and have side effects (must survive DCE). UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP
+/// take an arbitrary value plus an `i32imm` scope id; output register is tied
+/// to input via Constraints, so AsmPrinter strips them with no codegen change.
 HANDLE_TARGET_OPCODE(UNSAFE_ENTER)
 HANDLE_TARGET_OPCODE(UNSAFE_EXIT)
 HANDLE_TARGET_OPCODE(UNSAFE_IN)
 HANDLE_TARGET_OPCODE(UNSAFE_OUT)
+HANDLE_TARGET_OPCODE(UNSAFE_DEP)
 
 /// Pseudo probe
 HANDLE_TARGET_OPCODE(PSEUDO_PROBE)
