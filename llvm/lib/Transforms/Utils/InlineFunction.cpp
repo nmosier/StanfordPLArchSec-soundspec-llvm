@@ -63,6 +63,7 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
@@ -71,7 +72,6 @@
 #include "llvm/Transforms/Utils/AssumeBundleBuilder.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/Local.h"
-#include "llvm/Transforms/Utils/UnsafeScopeConversion.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include <algorithm>
 #include <cassert>
@@ -2721,59 +2721,66 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
     // Remember the first block that is newly cloned over.
     FirstNewBlock = LastBlock; ++FirstNewBlock;
 
-    // SoundSpec: translate scope markers across the inline boundary.
+    // SoundSpec: translate per-instruction scope tags across the inline
+    // boundary. The dispatch is on the (call-site MD, callee `unsafe` attr)
+    // pair. Three cases are non-trivial; everything else is a no-op.
     //
-    // Four cases by (caller, callee) unsafety:
+    //   A. Call site has `!unsafe`. The caller's scope subsumes everything
+    //      inlined: clear `!safe`/`!unsafe` on every inlined instruction,
+    //      then re-tag speculation primitives and transmitters with the
+    //      caller's `!unsafe` MDNode.
     //
-    //   1. Unsafe / Unsafe — inline as usual, no SoundSpec changes (the
-    //      caller's `unsafe` attribute already covers everything; the
-    //      callee's intrinsics, if any, stay since they may still carry
-    //      useful per-region info that downstream consumers want).
+    //   B. Call site has `!safe` and the callee is `unsafe`-attr. Allocate
+    //      a fresh scope ID (caller-local: `max(existing)+1`), clear
+    //      `!safe`/`!unsafe` on every inlined instruction, then tag
+    //      speculation primitives and transmitters with the new MDNode.
     //
-    //   2. Unsafe / Safe — strip every `llvm.unsafe.{enter,exit,in,out}`
-    //      intrinsic (RAUW-and-delete for `in`/`out`, plain delete for
-    //      `enter`/`exit`) and clear any `!unsafe` MD from the inlined
-    //      range. The function attribute is the single source of truth
-    //      for the caller, so per-instruction markers inherited from the
-    //      callee become noise. `llvm.unsafe.dep` is left alone — it
-    //      records data-flow facts that aren't scope-bounded.
+    //   C. Call site has `!safe` and the callee is not `unsafe`-attr. The
+    //      callee's existing `!unsafe` scope IDs must be renumbered into
+    //      the caller's namespace to avoid collision. Each unique scope
+    //      ID appearing in the inlined range is mapped to a fresh caller-
+    //      local ID; every `!unsafe` MDNode in the range is rebuilt.
     //
-    //   3. Safe / Safe — if the call site has no `!unsafe` MD, no change.
-    //      If it does, strip pre-existing MD + intrinsics from the inlined
-    //      range and re-tag every newly-inlined instruction with the call's
-    //      MDNode (call-site absorption).
-    //
-    //   4. Safe / Unsafe — if the call site has no `!unsafe` MD, synthesize
-    //      a fresh `!{i32 N}` MDNode (N allocated from the module-level
-    //      `!llvm.unsafe.next_scope` counter) and attach it to the call,
-    //      then proceed as if it had MD. Strip the inlined range, tag every
-    //      instruction with the call's MD.
-    //
-    // `repairUnsafeScopes(*Caller)` runs after `InlineFunctionImpl`
-    // completes (in the dispatcher) so that, for the case-3/4 newly-tagged
-    // region, `llvm.unsafe.in/out` markers get re-inserted at scope edges.
+    // `llvm.unsafe.{enter,exit,in,out}` intrinsics inside the callee are
+    // intentionally left untouched in all cases.
     {
       LLVMContext &Ctx = Caller->getContext();
-      bool CallerUnsafe = Caller->hasFnAttribute(Attribute::Unsafe);
+      MDNode *CallUnsafeMD = CB.getMetadata(LLVMContext::MD_unsafe);
+      MDNode *CallSafeMD = CB.getMetadata(LLVMContext::MD_safe);
       bool CalleeUnsafe = CalledFunc->hasFnAttribute(Attribute::Unsafe);
-      MDNode *CallSiteUnsafeMD = CB.getMetadata(LLVMContext::MD_unsafe);
+      bool CallerUnsafe = Caller->hasFnAttribute(Attribute::Unsafe);
 
-      auto StripInlinedRangeMarkers = [&]() {
-        SmallVector<Instruction *, 16> ToErase;
-        for (Function::iterator BB = FirstNewBlock, E = Caller->end(); BB != E;
-             ++BB) {
-          for (Instruction &I : *BB) {
-            I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+      auto stripScopeTags = [](Instruction &I) {
+        I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+        I.setMetadata(LLVMContext::MD_safe, nullptr);
+      };
+
+      // Walks the *post-inline* caller body (which contains the just-cloned
+      // callee) and returns a stateful allocator that yields fresh scope
+      // IDs strictly greater than every ID already present. Increasing
+      // values are produced on each call so a sequence of fresh IDs is
+      // mutually distinct.
+      auto makeFreshIDAllocator = [&]() {
+        uint64_t Max = 0;
+        auto bump = [&Max](uint64_t ID) { if (ID > Max) Max = ID; };
+        for (BasicBlock &BB : *Caller) {
+          for (Instruction &I : BB) {
+            if (MDNode *MD = I.getMetadata(LLVMContext::MD_unsafe))
+              for (Metadata *Op : MD->operands())
+                if (auto *CAM = dyn_cast_or_null<ConstantAsMetadata>(Op))
+                  if (auto *CI = dyn_cast_or_null<ConstantInt>(CAM->getValue()))
+                    bump(CI->getZExtValue());
             if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
               switch (II->getIntrinsicID()) {
               case Intrinsic::unsafe_enter:
               case Intrinsic::unsafe_exit:
-                ToErase.push_back(II);
+                if (auto *CI = dyn_cast<ConstantInt>(II->getArgOperand(0)))
+                  bump(CI->getZExtValue());
                 break;
               case Intrinsic::unsafe_in:
               case Intrinsic::unsafe_out:
-                II->replaceAllUsesWith(II->getArgOperand(0));
-                ToErase.push_back(II);
+                if (auto *CI = dyn_cast<ConstantInt>(II->getArgOperand(1)))
+                  bump(CI->getZExtValue());
                 break;
               default:
                 break;
@@ -2781,63 +2788,95 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
             }
           }
         }
-        for (Instruction *I : ToErase)
-          I->eraseFromParent();
+        return [Max]() mutable -> uint64_t { return ++Max; };
       };
 
-      auto AllocateFreshUnsafeScopeMD = [&]() -> MDNode * {
-        Module *M = Caller->getParent();
-        NamedMDNode *Counter =
-            M->getOrInsertNamedMetadata("llvm.unsafe.next_scope");
-        uint32_t Next = 0;
-        if (Counter->getNumOperands() > 0) {
-          if (auto *N = dyn_cast<MDNode>(Counter->getOperand(0)))
-            if (N->getNumOperands() == 1)
-              if (auto *CAM = dyn_cast<ConstantAsMetadata>(N->getOperand(0)))
-                if (auto *CI = dyn_cast<ConstantInt>(CAM->getValue()))
-                  Next = CI->getZExtValue();
-          Counter->clearOperands();
-        }
-        IntegerType *I32 = Type::getInt32Ty(Ctx);
-        Counter->addOperand(MDNode::get(
-            Ctx, {ConstantAsMetadata::get(ConstantInt::get(I32, Next + 1))}));
-        return MDNode::get(
-            Ctx, {ConstantAsMetadata::get(ConstantInt::get(I32, Next))});
+      auto makeScopeMD = [&Ctx](uint64_t ID) -> MDNode * {
+        return MDNode::get(Ctx, {ConstantAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(Ctx), ID))});
       };
 
-      auto TagInlinedRange = [&](MDNode *MD) {
-        for (Function::iterator BB = FirstNewBlock, E = Caller->end(); BB != E;
-             ++BB)
-          for (Instruction &I : *BB) {
-            // SoundSpec: allocas allocate stack slots; they aren't
-            // "operations" that can belong to an unsafe scope, so tagging
-            // them with `!unsafe` is a category error. Skip.
-            if (isa<AllocaInst>(&I))
-              continue;
-            I.setMetadata(LLVMContext::MD_unsafe, MD);
-          }
+      // In Cases A and B the caller's scope absorbs the inlined body. Every
+      // instruction that participates in the speculation model gets re-tagged
+      // with the caller-side scope MDNode. That includes:
+      //   - speculation primitives,
+      //   - transmitters,
+      //   - every CallBase (direct calls too): a direct call inside the
+      //     callee was implicitly governed by the callee's own attribute /
+      //     surrounding scope. Once inlined, it executes under the caller's
+      //     scope and needs an explicit tag to make that visible.
+      auto needsScopeTag = [](const Instruction &I) {
+        return isSpeculationPrimitive(I) || isTransmitter(I) ||
+               isa<CallBase>(&I);
+      };
+
+      auto inlinedRange = [&]() {
+        return llvm::make_range(FirstNewBlock, Caller->end());
       };
 
       if (CallerUnsafe) {
-        if (!CalleeUnsafe) {
-          // Case 2.
-          StripInlinedRangeMarkers();
-        }
-        // Case 1: nothing to do.
-      } else {
-        if (CalleeUnsafe && !CallSiteUnsafeMD) {
-          // Case 4 preprocessing: synthesize and attach to call site so
-          // the body below has uniform "call has MD" handling.
-          CallSiteUnsafeMD = AllocateFreshUnsafeScopeMD();
-          CB.setMetadata(LLVMContext::MD_unsafe, CallSiteUnsafeMD);
-        }
-        if (CallSiteUnsafeMD) {
-          // Cases 3 and 4 (post-preprocessing).
-          StripInlinedRangeMarkers();
-          TagInlinedRange(CallSiteUnsafeMD);
-        }
-        // Case 3 with no call MD: nothing to do.
+        // Caller is `unsafe`-attr: the function attribute already covers
+        // every instruction in it, so per-instruction !safe/!unsafe tags
+        // would be redundant. The verifier rejects !unsafe MD on any
+        // instruction inside an unsafe function (and !safe is meaningless
+        // there too). Strip both kinds from the inlined range.
+        for (BasicBlock &BB : inlinedRange())
+          for (Instruction &I : BB)
+            stripScopeTags(I);
+      } else if (CallUnsafeMD) {
+        // Case A.
+        for (BasicBlock &BB : inlinedRange())
+          for (Instruction &I : BB) {
+            stripScopeTags(I);
+            if (needsScopeTag(I))
+              I.setMetadata(LLVMContext::MD_unsafe, CallUnsafeMD);
+          }
+      } else if (CallSafeMD && CalleeUnsafe) {
+        // Case B.
+        auto Alloc = makeFreshIDAllocator();
+        MDNode *FreshMD = makeScopeMD(Alloc());
+        for (BasicBlock &BB : inlinedRange())
+          for (Instruction &I : BB) {
+            stripScopeTags(I);
+            if (needsScopeTag(I))
+              I.setMetadata(LLVMContext::MD_unsafe, FreshMD);
+          }
+      } else if (CallSafeMD && !CalleeUnsafe) {
+        // Case C. Map each unique callee scope ID to one fresh caller ID,
+        // then rebuild every !unsafe MDNode in the inlined range.
+        auto Alloc = makeFreshIDAllocator();
+        DenseMap<uint64_t, uint64_t> IDMap;
+        auto mapID = [&](uint64_t Old) -> uint64_t {
+          auto It = IDMap.find(Old);
+          if (It != IDMap.end())
+            return It->second;
+          uint64_t New = Alloc();
+          IDMap.try_emplace(Old, New);
+          return New;
+        };
+        IntegerType *I32 = Type::getInt32Ty(Ctx);
+        auto remap = [&](MDNode *MD) -> MDNode * {
+          SmallVector<Metadata *, 4> NewOps;
+          NewOps.reserve(MD->getNumOperands());
+          for (Metadata *Op : MD->operands()) {
+            auto *CAM = dyn_cast_or_null<ConstantAsMetadata>(Op);
+            auto *CI = CAM ? dyn_cast_or_null<ConstantInt>(CAM->getValue())
+                           : nullptr;
+            if (!CI) {
+              NewOps.push_back(Op);
+              continue;
+            }
+            NewOps.push_back(ConstantAsMetadata::get(
+                ConstantInt::get(I32, mapID(CI->getZExtValue()))));
+          }
+          return MDNode::get(Ctx, NewOps);
+        };
+        for (BasicBlock &BB : inlinedRange())
+          for (Instruction &I : BB)
+            if (MDNode *MD = I.getMetadata(LLVMContext::MD_unsafe))
+              I.setMetadata(LLVMContext::MD_unsafe, remap(MD));
       }
+      // All other (call-site MD, callee attr) combinations: no-op.
     }
 
     // Insert retainRV/clainRV runtime calls.
@@ -3550,16 +3589,10 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
                                         bool InsertLifetime,
                                         Function *ForwardVarArgsTo,
                                         OptimizationRemarkEmitter *ORE) {
-  Function *Caller = CB.getCaller();
   llvm::InlineResult Result = CanInlineCallSite(CB, IFI);
   if (Result.isSuccess()) {
     InlineFunctionImpl(CB, IFI, MergeAttributes, CalleeAAR, InsertLifetime,
                        ForwardVarArgsTo, ORE);
-    // SoundSpec: re-establish scope boundaries (`llvm.unsafe.in/out`)
-    // around the newly-tagged inlined region and across any
-    // scope-crossing data-flow edges introduced by the inline.
-    if (Caller)
-      repairUnsafeScopes(*Caller);
   }
 
   return Result;
