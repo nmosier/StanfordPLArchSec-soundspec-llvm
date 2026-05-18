@@ -350,6 +350,17 @@ static Value *copyFlags(const CallInst &Old, Value *New) {
   assert(!Old.isNoTailCall() && "do not copy notail call flags");
   if (auto *NewCI = dyn_cast_or_null<CallInst>(New))
     NewCI->setTailCallKind(Old.getTailCallKind());
+  // [soundspec] Library-call simplifications swap one call for another;
+  // the replacement is a CallBase that must carry `!safe`/`!unsafe` for
+  // the verifier. Carry the SoundSpec scope tags from the original.
+  if (auto *NewI = dyn_cast_or_null<Instruction>(New)) {
+    for (unsigned Kind :
+         {(unsigned)LLVMContext::MD_safe, (unsigned)LLVMContext::MD_unsafe,
+          (unsigned)LLVMContext::MD_unsafe_xmit,
+          (unsigned)LLVMContext::MD_unsafe_spec})
+      if (MDNode *N = Old.getMetadata(Kind))
+        NewI->setMetadata(Kind, N);
+  }
   return New;
 }
 
@@ -1549,12 +1560,27 @@ static Value *optimizeMemCmpConstantSize(CallInst *CI, Value *LHS, Value *RHS,
   if (Len == 0) // memcmp(s1,s2,0) -> 0
     return Constant::getNullValue(CI->getType());
 
+  // [soundspec] The original memcmp/bcmp call carries the speculation
+  // scope of the call site; the synthesized byte/word loads that replace
+  // it are transmitters in their own right and need to inherit the same
+  // scope so the verifier accepts them.
+  auto carryScope = [&](Instruction *I) {
+    for (unsigned MD : {(unsigned)LLVMContext::MD_safe,
+                       (unsigned)LLVMContext::MD_unsafe,
+                       (unsigned)LLVMContext::MD_unsafe_xmit,
+                       (unsigned)LLVMContext::MD_unsafe_spec})
+      if (MDNode *N = CI->getMetadata(MD))
+        I->setMetadata(MD, N);
+  };
+
   // memcmp(S1,S2,1) -> *(unsigned char*)LHS - *(unsigned char*)RHS
   if (Len == 1) {
-    Value *LHSV = B.CreateZExt(B.CreateLoad(B.getInt8Ty(), LHS, "lhsc"),
-                               CI->getType(), "lhsv");
-    Value *RHSV = B.CreateZExt(B.CreateLoad(B.getInt8Ty(), RHS, "rhsc"),
-                               CI->getType(), "rhsv");
+    auto *LHSLoad = B.CreateLoad(B.getInt8Ty(), LHS, "lhsc");
+    carryScope(LHSLoad);
+    Value *LHSV = B.CreateZExt(LHSLoad, CI->getType(), "lhsv");
+    auto *RHSLoad = B.CreateLoad(B.getInt8Ty(), RHS, "rhsc");
+    carryScope(RHSLoad);
+    Value *RHSV = B.CreateZExt(RHSLoad, CI->getType(), "rhsv");
     return B.CreateSub(LHSV, RHSV, "chardiff");
   }
 
@@ -1578,10 +1604,16 @@ static Value *optimizeMemCmpConstantSize(CallInst *CI, Value *LHS, Value *RHS,
     // alignment doesn't matter for that source because there is no load.
     if ((LHSV || getKnownAlignment(LHS, DL, CI) >= PrefAlignment) &&
         (RHSV || getKnownAlignment(RHS, DL, CI) >= PrefAlignment)) {
-      if (!LHSV)
-        LHSV = B.CreateLoad(IntType, LHS, "lhsv");
-      if (!RHSV)
-        RHSV = B.CreateLoad(IntType, RHS, "rhsv");
+      if (!LHSV) {
+        auto *L = B.CreateLoad(IntType, LHS, "lhsv");
+        carryScope(L);
+        LHSV = L;
+      }
+      if (!RHSV) {
+        auto *L = B.CreateLoad(IntType, RHS, "lhsv");
+        carryScope(L);
+        RHSV = L;
+      }
       return B.CreateZExt(B.CreateICmpNE(LHSV, RHSV), CI->getType(), "memcmp");
     }
   }
