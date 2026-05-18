@@ -238,6 +238,19 @@ STATISTIC(NumInvokes,
 STATISTIC(NumInvokesMerged, "Number of invokes that were merged together");
 STATISTIC(NumInvokeSetsFormed, "Number of invoke sets that were formed");
 
+// [soundspec] Propagate `!safe` and `!unsafe` metadata from a source
+// terminator (e.g. SwitchInst) onto a newly-created branch instruction
+// that replaces or derives from it. The verifier requires every
+// speculation primitive to carry one of these tags, so lowering
+// switches or transforming branches without preserving the tag breaks
+// downstream verification.
+static void propagateSpecMetadata(const Instruction *Src, Instruction *Dst) {
+  if (MDNode *MD = Src->getMetadata(LLVMContext::MD_safe))
+    Dst->setMetadata(LLVMContext::MD_safe, MD);
+  if (MDNode *MD = Src->getMetadata(LLVMContext::MD_unsafe))
+    Dst->setMetadata(LLVMContext::MD_unsafe, MD);
+}
+
 namespace {
 
 // The first field contains the value that the switch produces when a certain
@@ -845,8 +858,7 @@ private:
 } // end anonymous namespace
 
 static void eraseTerminatorAndDCECond(Instruction *TI,
-                                      MemorySSAUpdater *MSSAU = nullptr,
-                                      bool UnsafeOK = false) {
+                                      MemorySSAUpdater *MSSAU = nullptr) {
   Instruction *Cond = nullptr;
   if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
     Cond = dyn_cast<Instruction>(SI->getCondition());
@@ -857,7 +869,7 @@ static void eraseTerminatorAndDCECond(Instruction *TI,
     Cond = dyn_cast<Instruction>(IBI->getAddress());
   }
 
-  TI->eraseFromParentWithUnsafe(UnsafeOK);
+  TI->eraseFromParent();
   if (Cond)
     RecursivelyDeleteTriviallyDeadInstructions(Cond, nullptr, MSSAU);
 }
@@ -1417,6 +1429,11 @@ bool SimplifyCFGOpt::performValueComparisonIntoPredecessorFolding(
   // Now that the successors are updated, create the new Switch instruction.
   SwitchInst *NewSI = Builder.CreateSwitch(CV, PredDefault, PredCases.size());
   NewSI->setDebugLoc(PTI->getDebugLoc());
+  // [soundspec] The new switch replaces the predecessor's terminator
+  // (PTI), so it inherits PTI's scope tag. The folded successor's tag
+  // is dropped — its branch becomes case edges on the new switch and
+  // is no longer a speculation primitive of its own.
+  propagateSpecMetadata(PTI, NewSI);
   for (ValueEqualityComparisonCase &V : PredCases)
     NewSI->addCase(V.Value, V.Dest);
 
@@ -4921,6 +4938,8 @@ bool SimplifyCFGOpt::simplifyTerminatorOnSelect(Instruction *OldTerm,
       BranchInst *NewBI = Builder.CreateCondBr(Cond, TrueBB, FalseBB);
       setBranchWeights(*NewBI, {TrueWeight, FalseWeight},
                        /*IsExpected=*/false, /*ElideAllZero=*/true);
+      // [soundspec] Carry !safe/!unsafe from OldTerm onto the new branch.
+      propagateSpecMetadata(OldTerm, NewBI);
     }
   } else if (KeepEdge1 && (KeepEdge2 || TrueBB == FalseBB)) {
     // Neither of the selected blocks were successors, so this
@@ -5309,6 +5328,8 @@ bool SimplifyCFGOpt::simplifyBranchOnICmpChain(BranchInst *BI,
     auto *Br = TrueWhenEqual ? Builder.CreateCondBr(ExtraCase, EdgeBB, NewBB)
                              : Builder.CreateCondBr(ExtraCase, NewBB, EdgeBB);
     setExplicitlyUnknownBranchWeightsIfProfiled(*Br, DEBUG_TYPE);
+    // [soundspec] Inherit the original branch's scope tag.
+    propagateSpecMetadata(BI, Br);
 
     OldTI->eraseFromParent();
 
@@ -5350,10 +5371,14 @@ bool SimplifyCFGOpt::simplifyBranchOnICmpChain(BranchInst *BI,
     BranchInst *NewBI = Builder.CreateCondBr(Cond, EdgeBB, DefaultBB);
     if (HasProfile)
       setBranchWeights(*NewBI, BranchWeights, /*IsExpected=*/false);
+    // [soundspec] Inherit the original branch's scope tag.
+    propagateSpecMetadata(BI, NewBI);
     // We don't need to update PHI nodes since we don't add any new edges.
   } else {
     // Create the new switch instruction now.
     SwitchInst *New = Builder.CreateSwitch(CompVal, DefaultBB, Values.size());
+    // [soundspec] Inherit the original branch's scope tag.
+    propagateSpecMetadata(BI, New);
     if (HasProfile) {
       // We know the weight of the default case. We don't know the weight of the
       // other cases, but rather than completely lose profiling info, we split
@@ -5719,7 +5744,7 @@ bool SimplifyCFGOpt::simplifyUnreachable(UnreachableInst *UI) {
     BBI->replaceAllUsesWith(PoisonValue::get(BBI->getType()));
     // [soundspec] It's OK to delete an unsafe instruction here because
     // it is dead.
-    BBI->eraseFromParentWithUnsafe();
+    BBI->eraseFromParent();
     Changed = true;
   }
 
@@ -5741,7 +5766,7 @@ bool SimplifyCFGOpt::simplifyUnreachable(UnreachableInst *UI) {
       if (all_of(BI->successors(),
                  [BB](auto *Successor) { return Successor == BB; })) {
         new UnreachableInst(TI->getContext(), TI->getIterator());
-        TI->eraseFromParentWithUnsafe();
+        TI->eraseFromParent();
         Changed = true;
       } else {
         assert(BI->isConditional() && "Can't get here with an uncond branch.");
@@ -5760,7 +5785,7 @@ bool SimplifyCFGOpt::simplifyUnreachable(UnreachableInst *UI) {
         if (Options.AC)
           Options.AC->registerAssumption(cast<AssumeInst>(Assumption));
 
-        eraseTerminatorAndDCECond(BI, nullptr, true);
+        eraseTerminatorAndDCECond(BI, nullptr);
         Changed = true;
       }
       if (DTU)
@@ -6041,6 +6066,8 @@ bool SimplifyCFGOpt::turnSwitchRangeIntoICmp(SwitchInst *SI,
     assert(Max->getValue() == Min->getValue());
     Value *Cmp = Builder.CreateICmpEQ(SI->getCondition(), Min);
     NewBI = Builder.CreateCondBr(Cmp, Dest, OtherDest);
+    // [soundspec] Carry !safe/!unsafe from the switch onto the branch.
+    propagateSpecMetadata(SI, NewBI);
   }
   // If NumCases overflowed, then all possible values jump to the successor.
   else if (NumCases->isNullValue() && !Cases->empty()) {
@@ -6051,6 +6078,8 @@ bool SimplifyCFGOpt::turnSwitchRangeIntoICmp(SwitchInst *SI,
       Sub = Builder.CreateAdd(Sub, Offset, Sub->getName() + ".off");
     Value *Cmp = Builder.CreateICmpULT(Sub, NumCases, "switch");
     NewBI = Builder.CreateCondBr(Cmp, Dest, OtherDest);
+    // [soundspec] Carry !safe/!unsafe from the switch onto the branch.
+    propagateSpecMetadata(SI, NewBI);
   }
 
   // Update weight for the newly-created conditional branch.
@@ -7481,6 +7510,9 @@ static bool simplifySwitchLookup(SwitchInst *SI, IRBuilder<> &Builder,
         TableIndex, ConstantInt::get(MinCaseVal->getType(), TableSize));
     RangeCheckBranch =
         Builder.CreateCondBr(Cmp, LookupBB, SI->getDefaultDest());
+    // [soundspec] Carry !safe/!unsafe from the switch onto the range-check
+    // branch that replaces it.
+    propagateSpecMetadata(SI, RangeCheckBranch);
     CondBranch = RangeCheckBranch;
     if (DTU)
       Updates.push_back({DominatorTree::Insert, BB, LookupBB});
@@ -7521,6 +7553,9 @@ static bool simplifySwitchLookup(SwitchInst *SI, IRBuilder<> &Builder,
     Value *LoBit = Builder.CreateTrunc(
         Shifted, Type::getInt1Ty(Mod.getContext()), "switch.lobit");
     CondBranch = Builder.CreateCondBr(LoBit, LookupBB, SI->getDefaultDest());
+    // [soundspec] Carry !safe/!unsafe from the switch onto the hole-check
+    // branch that replaces it.
+    propagateSpecMetadata(SI, CondBranch);
     if (DTU) {
       Updates.push_back({DominatorTree::Insert, MaskBB, LookupBB});
       Updates.push_back({DominatorTree::Insert, MaskBB, SI->getDefaultDest()});
@@ -7542,6 +7577,13 @@ static bool simplifySwitchLookup(SwitchInst *SI, IRBuilder<> &Builder,
     const ResultListTy &ResultList = ResultLists[PHI];
     auto Replacement = PhiToReplacementMap.at(PHI);
     auto *Result = Replacement.replaceSwitch(TableIndex, Builder, DL, Fn);
+    // [soundspec] The switch-to-lookup-table rewrite returns a value that
+    // replaces the switch's per-PHI contribution. In the lookup-table /
+    // bitmap kinds this is a synthesized load (transmitter) that the
+    // verifier requires to carry !safe/!unsafe. Inherit the scope tag
+    // from the switch we're replacing.
+    if (auto *ResultI = dyn_cast<Instruction>(Result))
+      propagateSpecMetadata(SI, ResultI);
     // Do a small peephole optimization: re-use the switch table compare if
     // possible.
     if (!TableHasHoles && HasDefaultResults && RangeCheckBranch) {
@@ -7728,7 +7770,9 @@ static bool simplifySwitchWhenUMin(SwitchInst *SI, DomTreeUpdater *DTU) {
     BasicBlock *DeadCaseBB = I->getCaseSuccessor();
     DeadCaseBB->removePredecessor(BB);
     Updates.push_back({DominatorTree::Delete, BB, DeadCaseBB});
-    I = SIW->removeCase(I);
+    // Use the wrapper's removeCase (not SIW->removeCase, which bypasses
+    // the wrapper and leaves !prof weights stale).
+    I = SIW.removeCase(I);
     E = SIW->case_end();
   }
 
@@ -7823,6 +7867,9 @@ static bool simplifySwitchOfPowersOfTwo(SwitchInst *SI, IRBuilder<> &Builder,
     auto HasWeights =
         !ProfcheckDisableMetadataFixes && extractBranchWeights(*SI, Weights);
     auto *BI = BranchInst::Create(SplitBB, DefaultCaseBB, IsPow2, It);
+    // [soundspec] Carry !safe/!unsafe from the switch onto the power-of-2
+    // branch that replaces (part of) it.
+    propagateSpecMetadata(SI, BI);
     if (HasWeights && any_of(Weights, [](const auto &V) { return V != 0; })) {
       // IsPow2 covers a subset of the cases in which we'd go to the default
       // label. The other is those powers of 2 that don't appear in the case
@@ -7977,8 +8024,11 @@ static bool simplifySwitchOfCmpIntrinsic(SwitchInst *SI, IRBuilderBase &Builder,
   BasicBlock *BB = SI->getParent();
   Builder.SetInsertPoint(SI->getIterator());
   Value *ICmp = Builder.CreateICmp(Pred, Cmp->getLHS(), Cmp->getRHS());
-  Builder.CreateCondBr(ICmp, Succ, OtherSucc, NewWeights,
-                       SI->getMetadata(LLVMContext::MD_unpredictable));
+  BranchInst *NewBI =
+      Builder.CreateCondBr(ICmp, Succ, OtherSucc, NewWeights,
+                           SI->getMetadata(LLVMContext::MD_unpredictable));
+  // [soundspec] Carry !safe/!unsafe from the switch onto the new branch.
+  propagateSpecMetadata(SI, NewBI);
   OtherSucc->removePredecessor(BB);
   if (Unreachable)
     Unreachable->removePredecessor(BB);
