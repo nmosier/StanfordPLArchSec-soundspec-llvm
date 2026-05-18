@@ -603,12 +603,7 @@ void Function::stealArgumentListFrom(Function &Src) {
   Src.setValueSubclassData(Src.getSubclassDataFromValue() | (1 << 0));
 }
 
-void Function::deleteBodyImpl(bool ShouldDrop) {
-  // [soundspec] We're deleting the full function, so all instructions are
-  // safe to delete.
-  for (Instruction &I : instructions(*this))
-    I.setCanDelete();
-        
+void Function::deleteBodyImpl(bool ShouldDrop) {        
   setIsMaterializable(false);
 
   for (BasicBlock &BB : *this)
