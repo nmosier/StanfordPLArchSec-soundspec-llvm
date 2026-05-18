@@ -2270,6 +2270,10 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::NoCreateUndefOrPoison;
   case bitc::ATTR_KIND_UNSAFE:
     return Attribute::Unsafe;
+  case bitc::ATTR_KIND_SOUNDSPEC_CFI:
+    return Attribute::SoundSpecCfi;
+  case bitc::ATTR_KIND_SOUNDSPEC_ARG_UNSAFE:
+    return Attribute::SoundSpecArgUnsafe;
   }
 }
 
@@ -2410,6 +2414,8 @@ Error BitcodeReader::parseAttributeGroupBlock() {
             B.addVScaleRangeAttrFromRawRepr(Record[++i]);
           else if (Kind == Attribute::UWTable)
             B.addUWTableAttr(UWTableKind(Record[++i]));
+          else if (Kind == Attribute::SoundSpecCfi)
+            B.addSoundSpecCfiAttr(static_cast<uint32_t>(Record[++i]));
           else if (Kind == Attribute::AllocKind)
             B.addAllocKindAttr(static_cast<AllocFnKind>(Record[++i]));
           else if (Kind == Attribute::Memory) {

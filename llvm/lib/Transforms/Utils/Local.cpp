@@ -162,7 +162,7 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
                                 LLVMContext::MD_annotation});
 
       Value *Cond = BI->getCondition();
-      BI->eraseFromParentWithUnsafe();
+      BI->eraseFromParent();
       if (DeleteDeadConditions)
         RecursivelyDeleteTriviallyDeadInstructions(Cond, TLI);
       return true;
@@ -185,7 +185,7 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
       NewBI->copyMetadata(*BI, {LLVMContext::MD_loop, LLVMContext::MD_dbg,
                                 LLVMContext::MD_annotation});
 
-      BI->eraseFromParentWithUnsafe();
+      BI->eraseFromParent();
       if (DTU)
         DTU->applyUpdates({{DominatorTree::Delete, BB, OldDest}});
       return true;
@@ -611,7 +611,7 @@ void llvm::RecursivelyDeleteTriviallyDeadInstructions(
     if (MSSAU)
       MSSAU->removeMemoryAccess(I);
 
-    I->eraseFromParentWithUnsafe();
+    I->eraseFromParent();
   }
 }
 
@@ -1357,7 +1357,7 @@ bool llvm::TryToSimplifyUncondBranchFromEmptyBlock(BasicBlock *BB,
 
     // Clear the successor list of BB to match updates applying to DTU later.
     if (BB->getTerminator())
-      BB->back().eraseFromParentWithUnsafe();
+      BB->back().eraseFromParent();
 
     new UnreachableInst(BB->getContext(), BB);
     assert(succ_empty(BB) && "The successor list of BB isn't empty before "
@@ -2547,7 +2547,7 @@ unsigned llvm::changeToUnreachable(Instruction *I, bool PreserveLCSSA,
   while (BBI != BBE) {
     if (!BBI->use_empty())
       BBI->replaceAllUsesWith(PoisonValue::get(BBI->getType()));
-    BBI++->eraseFromParentWithUnsafe();
+    BBI++->eraseFromParent();
     ++NumInstrsRemoved;
   }
   if (DTU) {
@@ -2951,6 +2951,15 @@ static void combineMetadata(Instruction *K, const Instruction *J,
       default:
         K->setMetadata(Kind, nullptr); // Remove unknown metadata
         break;
+      // [soundspec] Preserve SoundSpec scope tags on K untouched. These are
+      // per-instruction scope identifiers; combining instructions should not
+      // erase the surviving instruction's scope.
+      case LLVMContext::MD_safe:
+      case LLVMContext::MD_unsafe:
+      case LLVMContext::MD_unsafe_init:
+      case LLVMContext::MD_unsafe_xmit:
+      case LLVMContext::MD_unsafe_spec:
+        break;
       case LLVMContext::MD_dbg:
         llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");
       case LLVMContext::MD_DIAssignID:
@@ -3152,13 +3161,28 @@ void llvm::copyMetadataForLoad(LoadInst &Dest, const LoadInst &Source) {
       Dest.setMetadata(ID, N);
       break;
 
-    // [soundspec] Propagate !unsafe metadata from source load onto the
-    // retyped clone. The clone is supposed to be a same-semantics retype
-    // of the source, so the unsafe scope (if any) carries over directly.
+    // [soundspec] Propagate !safe + !unsafe + !unsafe.xmit from source
+    // load onto the retyped clone. The clone is supposed to be a same-
+    // semantics retype of the source, so the scope tag(s) carry over
+    // directly.
+    case LLVMContext::MD_safe: {
+      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_safe);
+      (void)DestMD;
+      assert(!(DestMD && DestMD != N) && "Dest already has a !safe tag!");
+      Dest.setMetadata(ID, N);
+      break;
+    }
     case LLVMContext::MD_unsafe: {
       MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_unsafe);
       (void)DestMD;
       assert(!(DestMD && DestMD != N) && "Dest already has an unsafe scope!");
+      Dest.setMetadata(ID, N);
+      break;
+    }
+    case LLVMContext::MD_unsafe_xmit: {
+      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_unsafe_xmit);
+      (void)DestMD;
+      assert(!(DestMD && DestMD != N) && "Dest already has an unsafe.xmit scope!");
       Dest.setMetadata(ID, N);
       break;
     }

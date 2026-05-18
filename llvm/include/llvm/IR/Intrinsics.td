@@ -1611,13 +1611,41 @@ def int_unsafe_exit : DefaultAttrsIntrinsic<
     [llvm_i32_ty],
     [IntrInaccessibleMemOnly, IntrConvergent, ImmArg<ArgIndex<0>>]>;
 
-// `llvm.unsafe.dep.<T>(<T> value)` is a pure identity-passthrough on
-// its argument (return type matches the arg type). The unsafe-scope
-// list lives on the call's `!unsafe` metadata, not in an arg.
+// `llvm.unsafe.dep.<T>(<T> value, i32 depval)` is a pure
+// identity-passthrough on its first argument (return type matches
+// `value`'s type). The second argument is a runtime i32 register
+// value carrying SoundSpec dependency-tag information; it does not
+// affect the returned value but the codegen pseudo keeps it as a
+// register use so it cannot be DCE'd. The unsafe-scope list lives
+// on the call's `!unsafe` metadata, not in an arg.
 def int_unsafe_dep : PureIntrinsic<
     [llvm_any_ty],
-    [LLVMMatchType<0>],
+    [LLVMMatchType<0>, llvm_i32_ty],
     []>;
+
+// `llvm.unsafe.open(i32 %arg)` and `i32 llvm.unsafe.close()` are
+// SoundSpec barrier intrinsics modelling speculation-window
+// open/close pairs. Unlike `llvm.unsafe.enter`/`exit`, the operand of
+// `open` and the result of `close` are runtime values (not
+// immediates), so they appear in registers. They are deliberately
+// modelled as fully side-effecting with unknown memory read+write
+// effects (no `Intr*Mem` property) so the optimizer cannot reorder,
+// hoist, sink, fuse, or speculate any memory op past them.
+// `IntrConvergent` further prevents the calls themselves from being
+// made control-dependent on additional values. They are NOT
+// `IntrSpeculatable`. We use `Intrinsic` (rather than
+// `DefaultAttrsIntrinsic`) to avoid the `nosync`/`nofree`/
+// `nocallback`/`willreturn` defaults that would otherwise weaken the
+// barrier semantics.
+def int_unsafe_open : Intrinsic<
+    [],
+    [llvm_i32_ty],
+    [IntrConvergent]>;
+
+def int_unsafe_close : Intrinsic<
+    [llvm_i32_ty],
+    [],
+    [IntrConvergent]>;
 
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //

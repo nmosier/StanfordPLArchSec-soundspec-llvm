@@ -83,6 +83,11 @@ using namespace jumpthreading;
 STATISTIC(NumThreads, "Number of jumps threaded");
 STATISTIC(NumFolds,   "Number of terminators folded");
 STATISTIC(NumDupes,   "Number of branch blocks duplicated to eliminate phi");
+STATISTIC(NumSoundSpecUnfoldSelectBailed,
+          "[soundspec] tryToUnfoldSelectInCurrBB calls skipped because "
+          "the enclosing function lacks the `unsafe` attribute and the "
+          "unfold would synthesize a conditional branch outside any "
+          "tracked scope");
 
 static cl::opt<unsigned>
 BBDuplicateThreshold("jump-threading-threshold",
@@ -1409,6 +1414,14 @@ bool JumpThreadingPass::simplifyPartiallyRedundantLoad(LoadInst *LoadI) {
     NewVal->setDebugLoc(LoadI->getDebugLoc());
     if (AATags)
       NewVal->setAAMetadata(AATags);
+    // [soundspec] The PRE-hoisted load is a duplicated transmitter — same
+    // memory access at a different program point, same scope identity.
+    for (unsigned Kind :
+         {(unsigned)LLVMContext::MD_safe, (unsigned)LLVMContext::MD_unsafe,
+          (unsigned)LLVMContext::MD_unsafe_xmit,
+          (unsigned)LLVMContext::MD_unsafe_spec})
+      if (MDNode *MD = LoadI->getMetadata(Kind))
+        NewVal->setMetadata(Kind, MD);
 
     AvailablePreds.emplace_back(UnavailablePred, NewVal);
   }
@@ -2791,6 +2804,15 @@ void JumpThreadingPass::unfoldSelectInstr(BasicBlock *Pred, BasicBlock *BB,
   auto *BI = BranchInst::Create(NewBB, BB, SI->getCondition(), Pred);
   BI->applyMergedLocation(PredTerm->getDebugLoc(), SI->getDebugLoc());
   BI->copyMetadata(*SI, {LLVMContext::MD_prof});
+  // [soundspec] The new conditional branch in Pred semantically gates the
+  // same fork as BB's original conditional branch (which BB still keeps).
+  // Inherit BB's terminator scope so the unfolded branch joins the same
+  // scope set as the original speculation primitive.
+  if (auto *BBTerm = BB->getTerminator())
+    BI->copyMetadata(*BBTerm, {LLVMContext::MD_safe,
+                               LLVMContext::MD_unsafe,
+                               LLVMContext::MD_unsafe_xmit,
+                               LLVMContext::MD_unsafe_spec});
   SIUse->setIncomingValue(Idx, SI->getFalseValue());
   SIUse->addIncoming(SI->getTrueValue(), NewBB);
 
@@ -2934,6 +2956,17 @@ bool JumpThreadingPass::tryToUnfoldSelectInCurrBB(BasicBlock *BB) {
   // Disable this transform under MemorySanitizer.
   if (BB->getParent()->hasFnAttribute(Attribute::SanitizeMemory))
     return false;
+
+  // [soundspec] Unfolding a select into an if-then synthesizes a fresh
+  // conditional branch in the predecessor with no natural source of a
+  // SoundSpec scope tag (selects don't carry one). When the enclosing
+  // function is `unsafe`-attr the function attribute already subsumes
+  // per-instruction scopes, so the synthesized branch is verifier-safe.
+  // Otherwise, bail.
+  if (!BB->getParent()->hasFnAttribute(Attribute::Unsafe)) {
+    ++NumSoundSpecUnfoldSelectBailed;
+    return false;
+  }
 
   // If threading this would thread across a loop header, don't thread the edge.
   // See the comments above findLoopHeaders for justifications and caveats.

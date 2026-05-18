@@ -47,6 +47,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
@@ -473,6 +474,43 @@ Instruction *MemCpyOptPass::tryMergingIntoMemset(Instruction *StartInst,
     AMemSet = Builder.CreateMemSet(StartPtr, ByteVal, Range.End - Range.Start,
                                    Range.Alignment);
     AMemSet->mergeDIAssignID(Range.TheStores);
+
+    // [soundspec] The synthesized memset stands in for all stores/memsets in
+    // the range. Union their scope tags so the merged call carries the same
+    // verifier-required `!safe`/`!unsafe` plus `!unsafe.xmit`/`!unsafe.spec`.
+    // If any source carried `!unsafe`, the merged becomes `!unsafe` with the
+    // unioned scope set (the conservative choice for the mixed `!safe` +
+    // `!unsafe` case). Only when every source carried `!safe` does the
+    // merged stay `!safe`.
+    {
+      MDNode *MergedUnsafe = nullptr;
+      MDNode *AnySafe = nullptr;
+      bool EverySrcIsSafe = true;
+      MDNode *MergedXmit = nullptr;
+      MDNode *MergedSpec = nullptr;
+      for (Instruction *Src : Range.TheStores) {
+        if (MDNode *U = Src->getMetadata(LLVMContext::MD_unsafe)) {
+          MergedUnsafe = unsafe::mergeMetadata(MergedUnsafe, U);
+          EverySrcIsSafe = false;
+        } else if (MDNode *S = Src->getMetadata(LLVMContext::MD_safe)) {
+          AnySafe = S;
+        } else {
+          EverySrcIsSafe = false;
+        }
+        MergedXmit = unsafe::mergeMetadata(
+            MergedXmit, Src->getMetadata(LLVMContext::MD_unsafe_xmit));
+        MergedSpec = unsafe::mergeMetadata(
+            MergedSpec, Src->getMetadata(LLVMContext::MD_unsafe_spec));
+      }
+      if (MergedUnsafe)
+        AMemSet->setMetadata(LLVMContext::MD_unsafe, MergedUnsafe);
+      else if (EverySrcIsSafe && AnySafe)
+        AMemSet->setMetadata(LLVMContext::MD_safe, AnySafe);
+      if (MergedXmit)
+        AMemSet->setMetadata(LLVMContext::MD_unsafe_xmit, MergedXmit);
+      if (MergedSpec)
+        AMemSet->setMetadata(LLVMContext::MD_unsafe_spec, MergedSpec);
+    }
 
     LLVM_DEBUG(dbgs() << "Replace stores:\n"; for (Instruction *SI
                                                    : Range.TheStores) dbgs()
@@ -1259,6 +1297,11 @@ bool MemCpyOptPass::processMemCpyMemCpyDependence(MemCpyInst *M,
                                 CopySourceAlign, CopyLength, M->isVolatile());
 
   NewM->copyMetadata(*M, LLVMContext::MD_DIAssignID);
+  // [soundspec] The forwarded memcpy/memmove replaces M; carry its scope.
+  if (MDNode *MD = M->getMetadata(LLVMContext::MD_safe))
+    NewM->setMetadata(LLVMContext::MD_safe, MD);
+  if (MDNode *MD = M->getMetadata(LLVMContext::MD_unsafe))
+    NewM->setMetadata(LLVMContext::MD_unsafe, MD);
 
   assert(isa<MemoryDef>(MSSA->getMemoryAccess(M)));
   auto *LastDef = cast<MemoryDef>(MSSA->getMemoryAccess(M));
@@ -1481,6 +1524,14 @@ bool MemCpyOptPass::performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
   Instruction *NewM =
       Builder.CreateMemSet(MemCpy->getRawDest(), MemSet->getOperand(1),
                            CopySize, MemCpy->getDestAlign());
+  // [soundspec] The new memset replaces the memcpy semantically (writes
+  // to MemCpy's destination), but the BYTES it writes come from the
+  // dominating memset's value-of-zeros. Inherit the source memset's
+  // scope tag.
+  NewM->copyMetadata(*MemSet, {LLVMContext::MD_safe,
+                               LLVMContext::MD_unsafe,
+                               LLVMContext::MD_unsafe_xmit,
+                               LLVMContext::MD_unsafe_spec});
   auto *LastDef = cast<MemoryDef>(MSSA->getMemoryAccess(MemCpy));
   auto *NewAccess = MSSAU->createMemoryAccessAfter(NewM, nullptr, LastDef);
   MSSAU->insertDef(cast<MemoryDef>(NewAccess), /*RenameUses=*/true);

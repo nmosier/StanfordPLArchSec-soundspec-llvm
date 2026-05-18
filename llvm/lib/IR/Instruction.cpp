@@ -64,12 +64,6 @@ Instruction::Instruction(Type *ty, unsigned it, AllocInfo AllocInfo,
 Instruction::~Instruction() {
   assert(!getParent() && "Instruction still linked in the program!");
 
-  if (!CanDelete && getMetadata(LLVMContext::MD_unsafe)) {
-    errs() << "[soundspec] internal error: deleting unhandled instruction: "
-           << *this << "\n";
-    std::abort();
-  }
-
   // Replace any extant metadata uses of this instruction with poison to
   // preserve debug info accuracy. Some alternatives include:
   // - Treat Instruction like any other Value, and point its extant metadata
@@ -1424,22 +1418,4 @@ Instruction *Instruction::clone() const {
   New->SubclassOptionalData = SubclassOptionalData;
   New->copyMetadata(*this);
   return New;
-}
-
-MDNode *Instruction::takeMetadata(unsigned KindID) {
-  MDNode *MD = getMetadata(KindID);
-  setMetadata(KindID, nullptr);
-  return MD;
-}
-
-MDNode *Instruction::takeMetadata(StringRef Kind) {
-  MDNode *MD = getMetadata(Kind);
-  setMetadata(Kind, nullptr);
-  return MD;
-}
-
-Instruction::InstListType::iterator
-Instruction::eraseFromParentWithUnsafe(bool UnsafeOK) {
-  CanDelete |= UnsafeOK;
-  return eraseFromParent();
 }

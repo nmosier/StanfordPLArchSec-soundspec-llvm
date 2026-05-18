@@ -127,6 +127,10 @@ private:
   void EmitKCFITypePadding(const MachineFunction &MF, bool HasType = true);
   void LowerKCFI_CHECK(const MachineInstr &MI);
 
+  // SoundSpec CFI specific lowering for X86.
+  void LowerSOUNDSPEC_CFI_DEST(const MachineInstr &MI);
+  void LowerSOUNDSPEC_CFI_SRC(const MachineInstr &MI);
+
   // Address sanitizer specific lowering for X86.
   void LowerASAN_CHECK_MEMACCESS(const MachineInstr &MI);
 

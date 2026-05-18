@@ -1626,6 +1626,17 @@ bool LLParser::parseEnumAttribute(Attribute::AttrKind Attr, AttrBuilder &B,
     B.addUWTableAttr(Kind);
     return false;
   }
+  case Attribute::SoundSpecCfi: {
+    // soundspec_cfi(N) — 32-bit CFI label.
+    Lex.Lex();
+    uint32_t Label;
+    if (parseToken(lltok::lparen, "expected '(' here") ||
+        parseUInt32(Label) ||
+        parseToken(lltok::rparen, "expected ')' here"))
+      return true;
+    B.addSoundSpecCfiAttr(Label);
+    return false;
+  }
   case Attribute::AllocKind: {
     AllocFnKind Kind = AllocFnKind::Unknown;
     if (parseAllocKind(Kind))

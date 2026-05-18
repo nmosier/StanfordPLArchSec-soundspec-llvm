@@ -376,6 +376,16 @@ def SwiftAsync : EnumAttr<"swiftasync", IntersectPreserve, [ParamAttr]>;
 /// translating between the two representations across inline boundaries.
 def Unsafe : EnumAttr<"unsafe", IntersectPreserve, [FnAttr]>;
 
+/// SoundSpec: 32-bit CFI label assigned to this function. The label is
+/// authoritative for SoundSpec's hardware CFI scheme — it identifies the
+/// equivalence class of legal indirect-call destinations.
+def SoundSpecCfi : IntAttr<"soundspec_cfi", IntersectPreserve, [FnAttr]>;
+
+/// SoundSpec: parameter value is taint-carrying with respect to the
+/// unsafe-scope analysis. Treated as if the corresponding argument
+/// originated inside an unsafe scope at the call site.
+def SoundSpecArgUnsafe : EnumAttr<"soundspec_arg_unsafe", IntersectPreserve, [ParamAttr]>;
+
 /// Function must be in a unwind table.
 def UWTable : IntAttr<"uwtable", IntersectPreserve, [FnAttr]>;
 

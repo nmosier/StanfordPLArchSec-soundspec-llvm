@@ -3276,12 +3276,8 @@ static Constant *ConstantFoldIntrinsicCall2(Intrinsic::ID IntrinsicID, Type *Ty,
   assert(Operands.size() == 2 && "Wrong number of operands.");
 
   if ((IntrinsicID == Intrinsic::unsafe_in ||
-       IntrinsicID == Intrinsic::unsafe_out ||
-       IntrinsicID == Intrinsic::unsafe_dep)) {
-    // SoundSpec: all three intrinsics are identity passthroughs on their
-    // first argument when reachable here. For `unsafe.dep`, `Operands[1]`
-    // is always a constant by the precondition of `ConstantFoldIntrinsicCall2`,
-    // which already matches the "op2 is constant -> fold to op1" rule.
+       IntrinsicID == Intrinsic::unsafe_out)) {
+    // SoundSpec: identity passthrough on the first arg.
     return Operands[0];
   }
 

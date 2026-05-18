@@ -190,6 +190,22 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
   MDNode *AccessGroupMD = MI->getMetadata(LLVMContext::MD_access_group);
   if (AccessGroupMD)
     L->setMetadata(LLVMContext::MD_access_group, AccessGroupMD);
+  // [soundspec] Carry the memcpy's per-arg speculation scopes onto the
+  // load and store that replace it. `!safe` on the memcpy CallBase has
+  // `arg_size + 1` operands per `unsafe::getNumDepOperands`: slot 0 =
+  // callee, slot 1 = Dest arg, slot 2 = Src arg, slot 3 = Size, slot 4
+  // = isVol. On the replacement load (1 op = src ptr) `!safe` is
+  // `[src_scope]`; on the replacement store (2 ops = value, dest ptr)
+  // it is `[value_scope, dest_scope]`. The stored value came from src,
+  // so its scope is the src arg scope.
+  MDNode *SafeMD = MI->getMetadata(LLVMContext::MD_safe);
+  MDNode *UnsafeMD = MI->getMetadata(LLVMContext::MD_unsafe);
+  if (SafeMD)
+    L->setMetadata(LLVMContext::MD_safe,
+                   MDNode::get(MI->getContext(),
+                               {SafeMD->getOperand(2).get()}));
+  if (UnsafeMD)
+    L->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
 
   StoreInst *S = Builder.CreateStore(L, Dest);
   // Alignment from the mem intrinsic will be better, so use it.
@@ -200,6 +216,13 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
   if (AccessGroupMD)
     S->setMetadata(LLVMContext::MD_access_group, AccessGroupMD);
   S->copyMetadata(*MI, LLVMContext::MD_DIAssignID);
+  if (SafeMD)
+    S->setMetadata(LLVMContext::MD_safe,
+                   MDNode::get(MI->getContext(),
+                               {SafeMD->getOperand(2).get(),
+                                SafeMD->getOperand(1).get()}));
+  if (UnsafeMD)
+    S->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
 
   if (auto *MT = dyn_cast<MemTransferInst>(MI)) {
     // non-atomics can be volatile
@@ -269,6 +292,11 @@ Instruction *InstCombinerImpl::SimplifyAnyMemSet(AnyMemSetInst *MI) {
         MI->getContext(), APInt::getSplat(Len * 8, FillC->getValue()));
     StoreInst *S = Builder.CreateStore(FillVal, Dest, MI->isVolatile());
     S->copyMetadata(*MI, LLVMContext::MD_DIAssignID);
+    // [soundspec] Carry the memset's speculation scope onto the replacement store.
+    if (MDNode *SafeMD = MI->getMetadata(LLVMContext::MD_safe))
+      S->setMetadata(LLVMContext::MD_safe, SafeMD);
+    if (MDNode *UnsafeMD = MI->getMetadata(LLVMContext::MD_unsafe))
+      S->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
     for (DbgVariableRecord *DbgAssign : at::getDVRAssignmentMarkers(S)) {
       if (llvm::is_contained(DbgAssign->location_ops(), FillC))
         DbgAssign->replaceVariableLocationOp(FillC, FillVal);

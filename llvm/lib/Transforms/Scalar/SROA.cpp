@@ -5293,11 +5293,12 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            PartPtrTy, StoreBasePtr->getName() + "."),
             getAdjustedAlignment(SI, PartOffset),
             /*IsVolatile*/ false);
-        // [soundspec] propagate !unsafe + !unsafe.xmit + !unsafe.spec
+        // [soundspec] propagate !safe + !unsafe + !unsafe.xmit + !unsafe.spec
         // onto each presplit partial store.
         PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
                                    LLVMContext::MD_access_group,
                                    LLVMContext::MD_DIAssignID,
+                                   LLVMContext::MD_safe,
                                    LLVMContext::MD_unsafe,
                                    LLVMContext::MD_unsafe_xmit,
                                    LLVMContext::MD_unsafe_spec});
@@ -5389,10 +5390,11 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            LoadPartPtrTy, LoadBasePtr->getName() + "."),
             getAdjustedAlignment(LI, PartOffset),
             /*IsVolatile*/ false, LI->getName());
-        // [soundspec] propagate !unsafe + !unsafe.xmit onto each
+        // [soundspec] propagate !safe + !unsafe + !unsafe.xmit onto each
         // presplit partial load in the deferred-store case.
         PLoad->copyMetadata(*LI, {LLVMContext::MD_mem_parallel_loop_access,
                                   LLVMContext::MD_access_group,
+                                  LLVMContext::MD_safe,
                                   LLVMContext::MD_unsafe,
                                   LLVMContext::MD_unsafe_xmit});
       }
@@ -5407,10 +5409,11 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                          StorePartPtrTy, StoreBasePtr->getName() + "."),
           getAdjustedAlignment(SI, PartOffset),
           /*IsVolatile*/ false);
-      // [soundspec] propagate !unsafe + !unsafe.xmit + !unsafe.spec
+      // [soundspec] propagate !safe + !unsafe + !unsafe.xmit + !unsafe.spec
       // onto each presplit partial store in the deferred-store case.
       PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
                                  LLVMContext::MD_access_group,
+                                 LLVMContext::MD_safe,
                                  LLVMContext::MD_unsafe,
                                  LLVMContext::MD_unsafe_xmit,
                                  LLVMContext::MD_unsafe_spec});

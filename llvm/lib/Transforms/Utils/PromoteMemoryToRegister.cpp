@@ -405,11 +405,6 @@ struct PromoteMem2Reg {
   /// The state of incoming locations for the current DFS step.
   VectorWithUndo<DebugLoc> IncomingLocs;
 
-  /// [soundspec] Per-alloca `!unsafe` scope ID (if any). Parallel to
-  /// `Allocas`. Populated lazily when an alloca falls into the general
-  /// SSA-construction path.
-  SmallVector<std::optional<uint64_t>> AllocaUnsafeScopes;
-
   // DFS work stack.
   SmallVector<RenamePassData, 8> Worklist;
 
@@ -550,56 +545,6 @@ static void removeIntrinsicUsers(AllocaInst *AI) {
   }
 }
 
-// [soundspec] Return the singular scope ID encoded by `MD = !{i32 N}`.
-// Asserts the MDNode has exactly one i32 operand.
-static uint64_t getSingleUnsafeScopeID(MDNode *MD) {
-  assert(MD->getNumOperands() == 1 && "expected single-scope !unsafe MDNode");
-  auto *VAM = cast<ValueAsMetadata>(MD->getOperand(0).get());
-  return cast<ConstantInt>(VAM->getValue())->getLimitedValue();
-}
-
-// [soundspec] Return true if the `!unsafe` MDNode `MD` contains `ScopeID`.
-// `MD` may be null (treated as empty).
-static bool unsafeMDContainsScope(MDNode *MD, uint64_t ScopeID) {
-  if (!MD)
-    return false;
-  for (const MDOperand &Op : MD->operands()) {
-    auto *VAM = cast<ValueAsMetadata>(Op.get());
-    if (cast<ConstantInt>(VAM->getValue())->getLimitedValue() == ScopeID)
-      return true;
-  }
-  return false;
-}
-
-// [soundspec] Return a new `!unsafe` MDNode with `ScopeID` removed.
-// Returns nullptr if the result would be empty.
-static MDNode *removeUnsafeScopeFromMD(MDNode *MD, uint64_t ScopeID) {
-  if (!MD)
-    return nullptr;
-  SmallVector<Metadata *, 4> Remaining;
-  for (const MDOperand &Op : MD->operands()) {
-    auto *VAM = cast<ValueAsMetadata>(Op.get());
-    if (cast<ConstantInt>(VAM->getValue())->getLimitedValue() == ScopeID)
-      continue;
-    Remaining.push_back(Op.get());
-  }
-  if (Remaining.empty())
-    return nullptr;
-  return MDNode::get(MD->getContext(), Remaining);
-}
-
-// [soundspec] Insert `%dep = call llvm.unsafe.dep(V), !unsafe ScopeMD`
-// immediately before `InsertPos`. Returns the new call.
-static Value *insertUnsafeDep(Value *V, MDNode *ScopeMD,
-                              Instruction *InsertPos) {
-  assert(ScopeMD && "wrapping with empty scope MD is pointless");
-  IRBuilder<> IRB(InsertPos);
-  CallInst *Dep = IRB.CreateIntrinsic(Intrinsic::unsafe_dep, {V->getType()},
-                                      {V});
-  Dep->setMetadata(LLVMContext::MD_unsafe, ScopeMD);
-  return Dep;
-}
-
 /// Rewrite as many loads as possible given a single store.
 ///
 /// When there is only a single store, we can use the domtree to trivially
@@ -613,8 +558,7 @@ static bool rewriteSingleStoreAlloca(
     DominatorTree &DT, AssumptionCache *AC,
     SmallPtrSet<DbgVariableRecord *, 8> *DVRAssignsToDelete) {
   StoreInst *OnlyStore = Info.OnlyStore;
-  Value *RawStoredValue = OnlyStore->getOperand(0);
-  Value *ReplVal = RawStoredValue;
+  Value *ReplVal = OnlyStore->getOperand(0);
   // Loads may either load the stored value or uninitialized memory (undef).
   // If the stored value may be poison, then replacing an uninitialized memory
   // load with it would be incorrect. If the store dominates the load, we know
@@ -623,25 +567,6 @@ static bool rewriteSingleStoreAlloca(
       isa<Instruction>(ReplVal) || !isGuaranteedNotToBePoison(ReplVal);
   BasicBlock *StoreBB = OnlyStore->getParent();
   int StoreIndex = -1;
-
-  // [soundspec] Extract the alloca's `!unsafe` scope (if any). Each
-  // alloca carries at most a single scope.
-  MDNode *AllocaScopeMD = AI->getMetadata(LLVMContext::MD_unsafe);
-  std::optional<uint64_t> AllocaScopeID;
-  if (AllocaScopeMD)
-    AllocaScopeID = getSingleUnsafeScopeID(AllocaScopeMD);
-
-  // [soundspec] Strip the alloca's scope from the store's `!unsafe`
-  // list. If anything remains, materialize the store-side data
-  // dependency via `llvm.unsafe.dep(stored_value)` at the store's
-  // position so the surviving scope tags ride along with the SSA value
-  // that replaces dominated loads.
-  if (MDNode *StoreMD = OnlyStore->getMetadata(LLVMContext::MD_unsafe)) {
-    if (AllocaScopeID)
-      StoreMD = removeUnsafeScopeFromMD(StoreMD, *AllocaScopeID);
-    if (StoreMD)
-      ReplVal = insertUnsafeDep(ReplVal, StoreMD, OnlyStore);
-  }
 
   // Clear out UsingBlocks.  We will reconstruct it here if needed.
   Info.UsingBlocks.clear();
@@ -679,27 +604,13 @@ static bool rewriteSingleStoreAlloca(
     }
 
     // Otherwise, we *can* safely rewrite this load.
-    // [soundspec] Per-load: start from the shared `ReplVal`. Self-cycle
-    // (raw stored value is this load, only possible in unreachable
-    // code) → poison. If the load itself carries an `!unsafe` list,
-    // wrap with `llvm.unsafe.dep` at the load's position so the load's
-    // scopes ride along with the value that replaces it.
-    Value *RAUWVal = ReplVal;
-    if (RawStoredValue == LI)
-      RAUWVal = PoisonValue::get(LI->getType());
+    // If the replacement value is the load itself, this must occur in
+    // unreachable code; substitute poison.
+    if (ReplVal == LI)
+      ReplVal = PoisonValue::get(LI->getType());
 
-    // Run before the load-side wrap so `convertMetadataToAssumes`
-    // sees the raw value (undef/poison-detection for `!noundef` matters).
-    convertMetadataToAssumes(LI, RAUWVal, DL, AC, &DT);
-
-    if (MDNode *LoadMD = LI->getMetadata(LLVMContext::MD_unsafe)) {
-      assert((!AllocaScopeID ||
-              !unsafeMDContainsScope(LoadMD, *AllocaScopeID)) &&
-             "load must not carry the alloca's exclusive !unsafe scope");
-      RAUWVal = insertUnsafeDep(RAUWVal, LoadMD, LI);
-    }
-
-    LI->replaceAllUsesWith(RAUWVal);
+    convertMetadataToAssumes(LI, ReplVal, DL, AC, &DT);
+    LI->replaceAllUsesWith(ReplVal);
     LI->eraseFromParent();
     LBI.deleteValue(LI);
   }
@@ -776,30 +687,6 @@ static bool promoteSingleBlockAlloca(
   // binary search.
   llvm::sort(StoresByIndex, less_first());
 
-  // [soundspec] Extract the alloca's `!unsafe` scope (if any). Each
-  // alloca carries at most a single scope.
-  MDNode *AllocaScopeMD = AI->getMetadata(LLVMContext::MD_unsafe);
-  std::optional<uint64_t> AllocaScopeID;
-  if (AllocaScopeMD)
-    AllocaScopeID = getSingleUnsafeScopeID(AllocaScopeMD);
-
-  // [soundspec] Pre-compute the RAUW value for each store. For each
-  // store, strip the alloca's scope from its `!unsafe` list; if anything
-  // remains, wrap the stored value via `llvm.unsafe.dep` at the store's
-  // position. Loads that pick this store as their nearest-preceding
-  // will substitute the (possibly-wrapped) value.
-  DenseMap<StoreInst *, Value *> StoreRAUWVal;
-  for (auto &[Idx, SI] : StoresByIndex) {
-    Value *V = SI->getOperand(0);
-    if (MDNode *StoreMD = SI->getMetadata(LLVMContext::MD_unsafe)) {
-      if (AllocaScopeID)
-        StoreMD = removeUnsafeScopeFromMD(StoreMD, *AllocaScopeID);
-      if (StoreMD)
-        V = insertUnsafeDep(V, StoreMD, SI);
-    }
-    StoreRAUWVal[SI] = V;
-  }
-
   // Walk all of the loads from this alloca, replacing them with the nearest
   // store above them, if any.
   for (User *U : make_early_inc_range(AI->users())) {
@@ -815,7 +702,6 @@ static bool promoteSingleBlockAlloca(
         std::make_pair(LoadIdx, static_cast<StoreInst *>(nullptr)),
         less_first());
     Value *ReplVal;
-    StoreInst *NearestStore = nullptr;
     if (I == StoresByIndex.begin()) {
       if (StoresByIndex.empty())
         // If there are no stores, the load takes the undef value.
@@ -825,27 +711,16 @@ static bool promoteSingleBlockAlloca(
         // by the following stores - see main comment).
         return false;
     } else {
-      // Otherwise, there was a store before this load, the load takes its
-      // (possibly-wrapped) value.
-      NearestStore = std::prev(I)->second;
-      ReplVal = StoreRAUWVal[NearestStore];
+      // Otherwise, there was a store before this load, the load takes its value.
+      ReplVal = std::prev(I)->second->getOperand(0);
     }
 
     convertMetadataToAssumes(LI, ReplVal, DL, AC, &DT);
 
-    // If the raw stored value is the load itself, this must occur in
-    // unreachable code → substitute poison and skip the load-side wrap
-    // (chains of `unsafe.dep(poison)` would be silly).
-    if (NearestStore && NearestStore->getOperand(0) == LI)
+    // If the replacement value is the load itself, this must occur in
+    // unreachable code; substitute poison.
+    if (ReplVal == LI)
       ReplVal = PoisonValue::get(LI->getType());
-    else if (MDNode *LoadMD = LI->getMetadata(LLVMContext::MD_unsafe)) {
-      // [soundspec] Per-load wrap. Asserts the load doesn't carry the
-      // alloca's exclusive scope.
-      assert((!AllocaScopeID ||
-              !unsafeMDContainsScope(LoadMD, *AllocaScopeID)) &&
-             "load must not carry the alloca's exclusive !unsafe scope");
-      ReplVal = insertUnsafeDep(ReplVal, LoadMD, LI);
-    }
 
     LI->replaceAllUsesWith(ReplVal);
     LI->eraseFromParent();
@@ -889,7 +764,6 @@ void PromoteMem2Reg::run() {
 
   AllocaATInfo.resize(Allocas.size());
   AllocaDPUsers.resize(Allocas.size());
-  AllocaUnsafeScopes.resize(Allocas.size());
 
   AllocaInfo Info;
   LargeBlockInfo LBI;
@@ -954,31 +828,6 @@ void PromoteMem2Reg::run() {
 
     // Keep the reverse mapping of the 'Allocas' array for the rename pass.
     AllocaLookup[Allocas[AllocaNum]] = AllocaNum;
-
-    // [soundspec] Read the alloca's `!unsafe` scope (singular, asserted)
-    // and pre-wrap all of this alloca's stores. Each store's data
-    // operand is rewired to `call llvm.unsafe.dep(orig), !unsafe ...`
-    // for the surviving scopes after stripping the alloca's own scope.
-    // The renamer then naturally propagates these wrapped values via
-    // `IncomingVals`; dead wraps (overwritten before any load consumes
-    // them) get cleaned up by later DCE.
-    std::optional<uint64_t> &AllocaScopeID = AllocaUnsafeScopes[AllocaNum];
-    if (MDNode *AllocaScopeMD = AI->getMetadata(LLVMContext::MD_unsafe))
-      AllocaScopeID = getSingleUnsafeScopeID(AllocaScopeMD);
-    for (User *U : AI->users()) {
-      auto *SI = dyn_cast<StoreInst>(U);
-      if (!SI)
-        continue;
-      MDNode *StoreMD = SI->getMetadata(LLVMContext::MD_unsafe);
-      if (!StoreMD)
-        continue;
-      if (AllocaScopeID)
-        StoreMD = removeUnsafeScopeFromMD(StoreMD, *AllocaScopeID);
-      if (!StoreMD)
-        continue;
-      Value *DepCall = insertUnsafeDep(SI->getOperand(0), StoreMD, SI);
-      SI->setOperand(0, DepCall);
-    }
 
     // Unique the set of defining blocks for efficient lookup.
     SmallPtrSet<BasicBlock *, 32> DefBlocks(llvm::from_range,
@@ -1333,21 +1182,7 @@ void PromoteMem2Reg::RenamePass(BasicBlock *BB, BasicBlock *Pred) {
 
       Value *V = IncomingVals[AI->second];
 
-      // Run before the load-side wrap so `convertMetadataToAssumes`
-      // sees the raw value (undef-detection for `!noundef` matters).
       convertMetadataToAssumes(LI, V, SQ.DL, AC, &DT);
-
-      // [soundspec] If the load is tagged, wrap V in a load-side
-      // `llvm.unsafe.dep` at the load's position so the load's scope
-      // list rides along on the value that replaces it.
-      if (MDNode *LoadMD = LI->getMetadata(LLVMContext::MD_unsafe)) {
-        const std::optional<uint64_t> &AllocaScopeID =
-            AllocaUnsafeScopes[AI->second];
-        assert((!AllocaScopeID ||
-                !unsafeMDContainsScope(LoadMD, *AllocaScopeID)) &&
-               "load must not carry the alloca's exclusive !unsafe scope");
-        V = insertUnsafeDep(V, LoadMD, LI);
-      }
 
       // Anything using the load now uses the current value.
       LI->replaceAllUsesWith(V);

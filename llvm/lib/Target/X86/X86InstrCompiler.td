@@ -282,6 +282,29 @@ def KCFI_CHECK : PseudoI<
 }
 
 //===----------------------------------------------------------------------===//
+// Pseudo instructions used by SoundSpec CFI.
+//
+// SOUNDSPEC_CFI_DEST is a CFI landing pad that lowers to the 7-byte encoding
+//   0F 01 AE <imm32>
+// SOUNDSPEC_CFI_SRC is the corresponding call-site marker that lowers to
+//   0F 01 AF <imm32>
+// where <imm32> is the SoundSpec CFI label.
+//===----------------------------------------------------------------------===//
+def SOUNDSPEC_CFI_DEST : PseudoI<
+  (outs), (ins i32imm:$id), []>, Sched<[]> {
+  let hasSideEffects = 0;
+  let mayLoad = 0;
+  let mayStore = 0;
+}
+
+def SOUNDSPEC_CFI_SRC : PseudoI<
+  (outs), (ins i32imm:$id), []>, Sched<[]> {
+  let hasSideEffects = 0;
+  let mayLoad = 0;
+  let mayStore = 0;
+}
+
+//===----------------------------------------------------------------------===//
 // Pseudo instructions used by address sanitizer.
 //===----------------------------------------------------------------------===//
 let

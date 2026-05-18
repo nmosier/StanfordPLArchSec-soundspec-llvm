@@ -619,16 +619,24 @@ void DAGTypeLegalizer::SplitRes_ARITH_FENCE(SDNode *N, SDValue &Lo,
   Hi = DAG.getNode(ISD::ARITH_FENCE, DL, H.getValueType(), H);
 }
 
-// SoundSpec passthrough markers. Split operand 0 into Lo/Hi halves and
-// rebuild the same opcode (ISD::UNSAFE_IN or ISD::UNSAFE_OUT) on each
-// half, threading the same `i32 imm` scope id through both copies.
+// SoundSpec passthrough markers (UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP). Split
+// operand 0 into Lo/Hi halves and rebuild the same opcode on each half,
+// threading any trailing operands (e.g. the `i32 imm` scope id on
+// UNSAFE_IN/UNSAFE_OUT) through both copies. UNSAFE_DEP has no scope
+// operand — the scope lives on `!unsafe` metadata.
 void DAGTypeLegalizer::SplitRes_UNSAFE_IN_OUT(SDNode *N, SDValue &Lo,
                                               SDValue &Hi) {
   SDValue L, H;
   SDLoc DL(N);
   GetSplitOp(N->getOperand(0), L, H);
 
-  SDValue Scope = N->getOperand(1);
-  Lo = DAG.getNode(N->getOpcode(), DL, L.getValueType(), L, Scope);
-  Hi = DAG.getNode(N->getOpcode(), DL, H.getValueType(), H, Scope);
+  SmallVector<SDValue, 2> LoOps, HiOps;
+  LoOps.push_back(L);
+  HiOps.push_back(H);
+  for (unsigned I = 1, E = N->getNumOperands(); I != E; ++I) {
+    LoOps.push_back(N->getOperand(I));
+    HiOps.push_back(N->getOperand(I));
+  }
+  Lo = DAG.getNode(N->getOpcode(), DL, L.getValueType(), LoOps);
+  Hi = DAG.getNode(N->getOpcode(), DL, H.getValueType(), HiOps);
 }

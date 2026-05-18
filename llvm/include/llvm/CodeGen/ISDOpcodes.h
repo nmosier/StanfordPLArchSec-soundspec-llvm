@@ -1437,14 +1437,26 @@ enum NodeType {
 
   /// SoundSpec scope-region markers. Lowered from `llvm.unsafe.{enter,exit}`
   /// (chain-carrying, no result value; operand 0 is the chain, operand 1 is
-  /// a TargetConstant i32 scope ID) and `llvm.unsafe.{in,out,dep}`
-  /// (passthrough of the first operand; operand 0 is the value, operand 1
-  /// is a TargetConstant i32 scope ID, result type matches operand 0).
+  /// a TargetConstant i32 scope ID), `llvm.unsafe.{in,out}` (passthrough of
+  /// the first operand; operand 0 is the value, operand 1 is a
+  /// TargetConstant i32 scope ID, result type matches operand 0), and
+  /// `llvm.unsafe.dep` (passthrough of the first operand; operand 0 is the
+  /// value, operand 1 is a runtime i32 dependency-tag register value, result
+  /// type matches operand 0).
   UNSAFE_ENTER,
   UNSAFE_EXIT,
   UNSAFE_IN,
   UNSAFE_OUT,
   UNSAFE_DEP,
+
+  /// SoundSpec speculation-window barriers. Lowered from
+  /// `llvm.unsafe.open(i32)` and `i32 llvm.unsafe.close()`. Both are
+  /// chain-carrying full memory barriers.
+  /// UNSAFE_OPEN: operand 0 is the chain, operand 1 is the runtime i32
+  /// register value to mark; result is a single chain (no value).
+  /// UNSAFE_CLOSE: operand 0 is the chain; results are {i32 value, chain}.
+  UNSAFE_OPEN,
+  UNSAFE_CLOSE,
 
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for

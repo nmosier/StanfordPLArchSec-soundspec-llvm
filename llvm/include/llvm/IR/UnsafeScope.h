@@ -2,9 +2,7 @@
 #define LLVM_IR_UNSAFESCOPE_H
 
 #include "llvm/IR/CFG.h"
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
-#include "llvm/ADT/SmallSet.h"
 #include <optional>
 
 namespace llvm {
@@ -25,79 +23,12 @@ public:
   ~UnsafeBuilderScope();
 };
 
-inline Instruction &removeUnsafeScope(Instruction &I) {
-  I.setMetadata(LLVMContext::MD_unsafe, nullptr);
-  return I;
-}
-
-inline Instruction *removeUnsafeScope(Instruction *I) {
-  return &removeUnsafeScope(*I);
-}
-
-inline MDNode *takeUnsafeScope(Instruction &I){
-  return I.takeMetadata(LLVMContext::MD_unsafe);
-}
-
-inline MDNode *stashUnsafeScope(Instruction &I) {
-  MDNode *MD = I.takeMetadata(LLVMContext::MD_unsafe);
-  I.setMetadata("unsafe.bak", MD);
-  return MD;
-}
-
-inline MDNode *restoreUnsafeScope(Instruction &I) {
-  MDNode *MD = I.takeMetadata("unsafe.bak");
-  I.setMetadata(LLVMContext::MD_unsafe, MD);
-  return MD;
-}
-
-inline MDNode *takeUnsafeScopeStashed(Instruction &I) {
-  return I.takeMetadata("unsafe.bak");
-}
-
 inline MDNode *getUnsafeScope(const Instruction &I) {
   return I.getMetadata(LLVMContext::MD_unsafe);
 }
 
-std::optional<uint64_t> getUnsafeScopeID(const MDNode *MD);
-std::optional<uint64_t> getUnsafeScopeID(const Instruction &I);
-
-// TODO: Should reorder 2nd and 3rd arguments.
-// TODO: Remove this junk.
-bool isUnsafeScopeIntr(const Instruction &I, uint64_t UnsafeScopeID,
-                       Intrinsic::ID IID);
-bool isUnsafeScopeIntr(const Instruction &I, uint64_t *ID, Intrinsic::ID IID);
-bool isUnsafeScopeIntr(const Instruction &I, ArrayRef<Intrinsic::ID> IIDs);
-
-// TODO: Deprecate most of this in favor of match().
-
-// TODO: Remove.
-template <typename OutputIt>
-OutputIt insertSuccessors(Instruction *I, OutputIt out) {
-  if (Instruction *Succ = I->getNextNode()) {
-    *out++ = Succ;
-  } else {
-    for (auto *Succ : llvm::successors(I->getParent()))
-      *out++ = &Succ->front();
-  }
-  return out;
-}
-
-template <typename OutputIt>
-OutputIt insertPredecessors(Instruction *I, OutputIt Out) {
-  if (Instruction *Pred = I->getPrevNode()) {
-    *Out++ = Pred;
-  } else {
-    for (auto *Pred : llvm::predecessors(I->getParent()))
-      *Out++ = &Pred->back();
-  }
-  return Out;
-}
-
-std::optional<uint64_t> getValueUnsafeScope(const Value *V);
-
 namespace unsafe {
 
-bool isReturnLike(const Instruction &I);
 MDNode *mergeMetadata(MDNode *A, MDNode *B);
 
 // Removes the given unsafe scope ID from the list of unsafe scopes `MD`.
@@ -115,7 +46,22 @@ MDNode *enumerateScopeDeps(int ID, const Function &F);
 
 MDNode *enumerateArgumentDeps(const CallBase &I, unsigned ArgNo);
 
+MDNode *enumerateDeps(const Value *V);
+
 MDNode *loopMetadata(const Loop &L);
+
+bool isRelevantCall(const Instruction &I);
+
+unsigned getNumDepOperands(const Instruction &I);
+Value *getDepOperand(Instruction &I, unsigned Idx);
+
+uint32_t getScopeFromMetadata(const Metadata *MD);
+
+MDNode *addIDToSet(MDNode *Set, Metadata *ID);
+
+void addIDToMetadataSetInPlace(Instruction &I, StringRef Key, Metadata *ID);
+
+uint32_t getMaxScopeID(const Function &F);
 
 } // namespace unsafe
 

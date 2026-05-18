@@ -63023,6 +63023,14 @@ X86TargetLowering::EmitKCFICheck(MachineBasicBlock &MBB,
   assert(MBBI->isCall() && MBBI->getCFIType() &&
          "Invalid call instruction for a KCFI check");
 
+  // [soundspec] We replace KCFI's implementation to instead use
+  // our new instructions, in this case SOUNDSPEC_CFI_SRC.
+  return BuildMI(MBB, MBBI, MIMetadata(*MBBI), TII->get(X86::SOUNDSPEC_CFI_SRC))
+      .addImm(MBBI->getCFIType())
+      .getInstr();
+
+  // ====== OLD LLVM IMPLEMENTATION (FOR REFERENCE) ==== //
+
   MachineFunction &MF = *MBB.getParent();
   // If the call target is a memory operand, unfold it and use R11 for the
   // call, so KCFI_CHECK won't have to recompute the address.

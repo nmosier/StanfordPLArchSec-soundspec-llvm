@@ -52,6 +52,11 @@ using namespace PatternMatch;
 #define DEBUG_TYPE "constraint-elimination"
 
 STATISTIC(NumCondsRemoved, "Number of instructions removed");
+STATISTIC(NumSoundSpecConstraintElimBailed,
+          "[soundspec] constraint-elimination runs skipped because the "
+          "enclosing function lacks the `unsafe` attribute and the pass "
+          "would synthesize/replace speculation primitives outside any "
+          "tracked scope");
 DEBUG_COUNTER(EliminatedCounter, "conds-eliminated",
               "Controls which conditions are eliminated");
 
@@ -2115,6 +2120,17 @@ static bool eliminateConstraints(Function &F, DominatorTree &DT, LoopInfo &LI,
 
 PreservedAnalyses ConstraintEliminationPass::run(Function &F,
                                                  FunctionAnalysisManager &AM) {
+  // [soundspec] Constraint elimination replaces compares with constants
+  // and folds branches based on dominating-condition reasoning. The new
+  // edges and surviving instructions would need per-edge scope plumbing
+  // to be SoundSpec-correct. When the enclosing function is `unsafe`-attr
+  // the function attribute subsumes per-instruction scopes; otherwise,
+  // bail.
+  if (!F.hasFnAttribute(Attribute::Unsafe)) {
+    ++NumSoundSpecConstraintElimBailed;
+    return PreservedAnalyses::all();
+  }
+
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &LI = AM.getResult<LoopAnalysis>(F);
   auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);

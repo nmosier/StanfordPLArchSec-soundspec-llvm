@@ -139,6 +139,13 @@ HANDLE_TARGET_OPCODE(UNSAFE_IN)
 HANDLE_TARGET_OPCODE(UNSAFE_OUT)
 HANDLE_TARGET_OPCODE(UNSAFE_DEP)
 
+/// SoundSpec speculation-window barriers. UNSAFE_OPEN takes one i32 register
+/// operand; UNSAFE_CLOSE produces one i32 register result. Both are modelled
+/// as full memory barriers (mayLoad / mayStore / hasSideEffects) so the MIR
+/// pipeline cannot reorder anything across them.
+HANDLE_TARGET_OPCODE(UNSAFE_OPEN)
+HANDLE_TARGET_OPCODE(UNSAFE_CLOSE)
+
 /// Pseudo probe
 HANDLE_TARGET_OPCODE(PSEUDO_PROBE)
 

@@ -19,6 +19,7 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Transforms/InstCombine/InstCombiner.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -29,6 +30,11 @@ using namespace PatternMatch;
 
 STATISTIC(NumDeadStore, "Number of dead stores eliminated");
 STATISTIC(NumGlobalCopies, "Number of allocas copied from constant global");
+STATISTIC(NumSoundSpecLoadSelectBailed,
+          "[soundspec] load(select(...)) -> select(load, load) folds "
+          "skipped because the enclosing function lacks the `unsafe` "
+          "attribute and the fold would speculate both loads outside "
+          "any tracked scope");
 
 static cl::opt<unsigned> MaxCopiedFromConstantUsers(
     "instcombine-max-copied-from-constant-users", cl::init(300),
@@ -1139,6 +1145,14 @@ Instruction *InstCombinerImpl::visitLoadInst(LoadInst &LI) {
     //
     if (SelectInst *SI = dyn_cast<SelectInst>(Op)) {
       // load (select (Cond, &V1, &V2))  --> select(Cond, load &V1, load &V2).
+      // [soundspec] The fold speculates both loads, doubling the number
+      // of protected transmitters. Skip when the enclosing function lacks
+      // `unsafe` attr — there's no defensible single scope for the new
+      // pair derived from one original load.
+      if (!LI.getFunction()->hasFnAttribute(Attribute::Unsafe)) {
+        ++NumSoundSpecLoadSelectBailed;
+        return nullptr;
+      }
       Align Alignment = LI.getAlign();
       if (isSafeToLoadUnconditionally(SI->getOperand(1), LI.getType(),
                                       Alignment, DL, SI) &&
@@ -1658,6 +1672,29 @@ bool InstCombinerImpl::mergeStoreIntoSuccessor(StoreInst &SI) {
   AAMDNodes AATags = SI.getAAMetadata();
   if (AATags)
     NewSI->setAAMetadata(AATags.merge(OtherStore->getAAMetadata()));
+
+  // [soundspec] The merged store stands in for both originals; union their
+  // SoundSpec scope tags. If either side carried `!unsafe`, the result is
+  // `!unsafe` with the merged scope set (so a `!safe` + `!unsafe` mix
+  // becomes `!unsafe`, conservatively keeping protection). Only when both
+  // sides were `!safe` is the merged store `!safe`.
+  auto mergeScopeKind = [&](unsigned Kind) {
+    MDNode *A = SI.getMetadata(Kind);
+    MDNode *B = OtherStore->getMetadata(Kind);
+    if (A || B)
+      NewSI->setMetadata(Kind, unsafe::mergeMetadata(A, B));
+  };
+  MDNode *SIUnsafe = SI.getMetadata(LLVMContext::MD_unsafe);
+  MDNode *OSUnsafe = OtherStore->getMetadata(LLVMContext::MD_unsafe);
+  if (SIUnsafe || OSUnsafe) {
+    NewSI->setMetadata(LLVMContext::MD_unsafe,
+                       unsafe::mergeMetadata(SIUnsafe, OSUnsafe));
+  } else if (MDNode *SISafe = SI.getMetadata(LLVMContext::MD_safe)) {
+    if (OtherStore->getMetadata(LLVMContext::MD_safe))
+      NewSI->setMetadata(LLVMContext::MD_safe, SISafe);
+  }
+  mergeScopeKind(LLVMContext::MD_unsafe_xmit);
+  mergeScopeKind(LLVMContext::MD_unsafe_spec);
 
   // Nuke the old stores.
   eraseInstFromFunction(SI);

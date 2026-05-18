@@ -7051,17 +7051,30 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   }
   case Intrinsic::unsafe_in:
   case Intrinsic::unsafe_out: {
-    // SoundSpec: lower the passthrough markers to `ISD::UNSAFE_IN`/`OUT`.
-    // The scope id (arg 1) is an ImmArg, so we materialize it as a
-    // TargetConstant to keep it as an immediate operand on the resulting
-    // pseudo-instruction (no register allocation for it).
+    // SoundSpec: lower the passthrough markers to
+    // `ISD::UNSAFE_IN`/`OUT`. The scope id (arg 1) is an ImmArg,
+    // so we materialize it as a TargetConstant to keep it as an
+    // immediate operand on the resulting pseudo-instruction (no
+    // register allocation for it).
     SDValue Val = getValue(I.getArgOperand(0));
     auto *Scope = cast<ConstantInt>(I.getArgOperand(1));
     SDValue ScopeOp =
         DAG.getTargetConstant(Scope->getZExtValue(), sdl, MVT::i32);
-    unsigned Op = (Intrinsic == Intrinsic::unsafe_in) ? ISD::UNSAFE_IN
-                                                      : ISD::UNSAFE_OUT;
+    unsigned Op =
+        Intrinsic == Intrinsic::unsafe_in ? ISD::UNSAFE_IN : ISD::UNSAFE_OUT;
     setValue(&I, DAG.getNode(Op, sdl, Val.getValueType(), Val, ScopeOp));
+    return;
+  }
+  case Intrinsic::unsafe_dep: {
+    // SoundSpec: passthrough of arg 0 (the scope id is carried on the
+    // call's `!unsafe` metadata, not as an argument). Arg 1 is a runtime
+    // i32 dependency-tag value, threaded through as a second SDNode
+    // operand so it survives as a register use on the resulting pseudo
+    // MachineInstr (whose dst is tied to src and is stripped at AsmPrinter).
+    SDValue Val = getValue(I.getArgOperand(0));
+    SDValue DepVal = getValue(I.getArgOperand(1));
+    setValue(&I,
+             DAG.getNode(ISD::UNSAFE_DEP, sdl, Val.getValueType(), Val, DepVal));
     return;
   }
   case Intrinsic::unsafe_enter:
@@ -7078,6 +7091,26 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     SDValue Node =
         DAG.getNode(Op, sdl, MVT::Other, getRoot(), ScopeOp);
     DAG.setRoot(Node);
+    return;
+  }
+  case Intrinsic::unsafe_open: {
+    // SoundSpec: chain-carrying barrier. Operand 0 is the chain, operand 1
+    // is the runtime i32 register value; produces only a chain. The chain
+    // forces all prior memory ops to be sequenced before, and all later
+    // memory ops to be sequenced after.
+    SDValue Arg = getValue(I.getArgOperand(0));
+    SDValue Node =
+        DAG.getNode(ISD::UNSAFE_OPEN, sdl, MVT::Other, getRoot(), Arg);
+    DAG.setRoot(Node);
+    return;
+  }
+  case Intrinsic::unsafe_close: {
+    // SoundSpec: chain-carrying barrier producing an i32 value. Operand 0
+    // is the chain; results are {i32 value, chain}.
+    SDVTList VTs = DAG.getVTList(MVT::i32, MVT::Other);
+    SDValue Node = DAG.getNode(ISD::UNSAFE_CLOSE, sdl, VTs, getRoot());
+    setValue(&I, Node.getValue(0));
+    DAG.setRoot(Node.getValue(1));
     return;
   }
   case Intrinsic::fma:

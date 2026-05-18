@@ -36,6 +36,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -73,6 +74,10 @@ using namespace llvm::PatternMatch;
 
 STATISTIC(NumBranches, "Number of branches unswitched");
 STATISTIC(NumSwitches, "Number of switches unswitched");
+STATISTIC(NumSoundSpecUnswitchBailed,
+          "[soundspec] loop unswitches skipped because the enclosing "
+          "function lacks the `unsafe` attribute and the pass would "
+          "synthesize guard branches outside any tracked scope");
 STATISTIC(NumSelects, "Number of selects turned into branches for unswitching");
 STATISTIC(NumGuards, "Number of guards turned into branches for unswitching");
 STATISTIC(NumTrivial, "Number of unswitches that are trivial");
@@ -331,6 +336,12 @@ static void buildPartialUnswitchConditionalBranch(
                        : nullptr);
   if (!HasBranchWeights)
     setExplicitlyUnknownBranchWeightsIfProfiled(*BR, DEBUG_TYPE);
+  // [soundspec] The new conditional branch is a speculation primitive
+  // that inherits its scope from the original branch.
+  if (MDNode *MD = ComputeProfFrom.getMetadata(LLVMContext::MD_safe))
+    BR->setMetadata(LLVMContext::MD_safe, MD);
+  if (MDNode *MD = ComputeProfFrom.getMetadata(LLVMContext::MD_unsafe))
+    BR->setMetadata(LLVMContext::MD_unsafe, MD);
 }
 
 /// Copy a set of loop invariant values, and conditionally branch on them.
@@ -389,6 +400,12 @@ static void buildPartialInvariantUnswitchConditionalBranch(
                        Direction ? &NormalSucc : &UnswitchedSucc, ProfData);
   if (!ProfData)
     setExplicitlyUnknownBranchWeightsIfProfiled(*BR, DEBUG_TYPE);
+  // [soundspec] The new conditional branch is a speculation primitive
+  // that inherits its scope from the original branch.
+  if (MDNode *MD = OriginalBranch.getMetadata(LLVMContext::MD_safe))
+    BR->setMetadata(LLVMContext::MD_safe, MD);
+  if (MDNode *MD = OriginalBranch.getMetadata(LLVMContext::MD_unsafe))
+    BR->setMetadata(LLVMContext::MD_unsafe, MD);
 }
 
 /// Rewrite the PHI nodes in an unswitched loop exit basic block.
@@ -928,6 +945,12 @@ static bool unswitchTrivialSwitch(Loop &L, SwitchInst &SI, DominatorTree &DT,
   // one.
   auto *NewSI = SwitchInst::Create(LoopCond, NewPH, ExitCases.size(), OldPH);
   NewSI->setDebugLoc(SIW->getDebugLoc());
+  // [soundspec] The new unswitched switch is a speculation primitive that
+  // inherits its scope from the original switch.
+  if (MDNode *MD = SI.getMetadata(LLVMContext::MD_safe))
+    NewSI->setMetadata(LLVMContext::MD_safe, MD);
+  if (MDNode *MD = SI.getMetadata(LLVMContext::MD_unsafe))
+    NewSI->setMetadata(LLVMContext::MD_unsafe, MD);
   SwitchInstProfUpdateWrapper NewSIW(*NewSI);
 
   // Rewrite the IR for the unswitched basic blocks. This requires two steps.
@@ -3203,12 +3226,22 @@ injectPendingInvariantConditions(NonTrivialUnswitchCandidate Candidate, Loop &L,
       Builder.CreateCondBr(InjectedCond, InLoopSucc, CheckBlock);
   // We don't know anything about the relation between the limits.
   setExplicitlyUnknownBranchWeightsIfProfiled(*InvariantBr, DEBUG_TYPE);
+  // [soundspec] Both new conditional branches replace TI semantically and
+  // inherit its speculation scope.
+  if (MDNode *MD = TI->getMetadata(LLVMContext::MD_safe))
+    InvariantBr->setMetadata(LLVMContext::MD_safe, MD);
+  if (MDNode *MD = TI->getMetadata(LLVMContext::MD_unsafe))
+    InvariantBr->setMetadata(LLVMContext::MD_unsafe, MD);
 
   Builder.SetInsertPoint(CheckBlock);
-  Builder.CreateCondBr(
+  auto *CheckBr = Builder.CreateCondBr(
       TI->getCondition(), TI->getSuccessor(0), TI->getSuccessor(1),
       !ProfcheckDisableMetadataFixes ? TI->getMetadata(LLVMContext::MD_prof)
                                      : nullptr);
+  if (MDNode *MD = TI->getMetadata(LLVMContext::MD_safe))
+    CheckBr->setMetadata(LLVMContext::MD_safe, MD);
+  if (MDNode *MD = TI->getMetadata(LLVMContext::MD_unsafe))
+    CheckBr->setMetadata(LLVMContext::MD_unsafe, MD);
   TI->eraseFromParent();
 
   // Fixup phis.
@@ -3737,6 +3770,19 @@ PreservedAnalyses SimpleLoopUnswitchPass::run(Loop &L, LoopAnalysisManager &AM,
   (void)F;
   LLVM_DEBUG(dbgs() << "Unswitching loop in " << F.getName() << ": " << L
                     << "\n");
+
+  // [soundspec] Unswitching synthesizes guard branches (and sometimes a
+  // freeze) for which there's no natural source instruction to inherit a
+  // scope tag from — the select-into-branch path produces an untagged
+  // CondBr that the nontrivial unswitch then hoists. Doing this correctly
+  // under SoundSpec needs per-guard scope plumbing. When the enclosing
+  // function is `unsafe`-attr the function attribute already subsumes
+  // every per-instruction scope, so the synthesized guards are verifier-
+  // safe. Otherwise, bail.
+  if (!F.hasFnAttribute(Attribute::Unsafe)) {
+    ++NumSoundSpecUnswitchBailed;
+    return PreservedAnalyses::all();
+  }
 
   std::optional<MemorySSAUpdater> MSSAU;
   if (AR.MSSA) {

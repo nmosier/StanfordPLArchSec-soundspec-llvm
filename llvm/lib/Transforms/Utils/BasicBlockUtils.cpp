@@ -137,9 +137,6 @@ void llvm::detachDeadBlocks(ArrayRef<BasicBlock *> BBs,
 
     UniqueEHRetBlocksToDelete.clear();
 
-    for (Instruction &I : *BB)
-      I.setCanDelete();
-
     // Detaching and emptying the current basic block.
     emptyAndDetachBlock(BB, Updates, KeepOneInputPHIs);
   }
@@ -354,7 +351,7 @@ bool llvm::MergeBlockIntoPredecessor(BasicBlock *BB, DomTreeUpdater *DTU,
     PredBB_BI->setSuccessor(FallThruPath, NewSucc);
   } else {
     // Delete the unconditional branch from the predecessor.
-    PredBB->back().eraseFromParentWithUnsafe();
+    PredBB->back().eraseFromParent();
 
     // Move terminator instruction.
     BB->back().moveBeforePreserving(*PredBB, PredBB->end());

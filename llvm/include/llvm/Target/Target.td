@@ -1435,13 +1435,45 @@ def UNSAFE_OUT : StandardPseudoInstruction {
   let isMeta = true;
 }
 // UNSAFE_DEP: passthrough identity like UNSAFE_IN/OUT, but the scope id is
-// carried on `!unsafe` metadata rather than as an explicit operand.
+// carried on `!unsafe` metadata rather than as an explicit operand. The
+// `$depval` operand is a runtime i32 register value (SoundSpec dependency
+// tag) — kept as a register use so it cannot be DCE'd.
 def UNSAFE_DEP : StandardPseudoInstruction {
   let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$src);
+  let InOperandList = (ins unknown:$src, unknown:$depval);
   let AsmString = "";
   let hasSideEffects = false;
   let Constraints = "$src = $dst";
+  let isMeta = true;
+}
+
+// UNSAFE_OPEN/UNSAFE_CLOSE: SoundSpec speculation-window barriers. Modelled
+// as full memory barriers (`mayLoad`/`mayStore`/`hasSideEffects`) so the MIR
+// pipeline cannot reorder anything across them, NOT speculatable, and
+// `isConvergent = true` so they cannot be made control-dependent. The operand
+// of UNSAFE_OPEN and the result of UNSAFE_CLOSE are runtime i32 register
+// values (typed `unknown` here so the pseudo is target-independent and picks
+// up whatever GPR class the lowering chooses). `isMeta = true` strips them at
+// AsmPrinter, matching the rest of the SoundSpec scope-region markers; the
+// actual machine-code emission belongs to a later target-specific pass.
+def UNSAFE_OPEN : StandardPseudoInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$arg);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let mayLoad = true;
+  let mayStore = true;
+  let isConvergent = true;
+  let isMeta = true;
+}
+def UNSAFE_CLOSE : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let mayLoad = true;
+  let mayStore = true;
+  let isConvergent = true;
   let isMeta = true;
 }
 

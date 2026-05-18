@@ -2601,6 +2601,15 @@ void SelectionDAGISel::Select_UNSAFE_OUT(SDNode *N) {
                        {N->getOperand(0), N->getOperand(1)});
 }
 
+void SelectionDAGISel::Select_UNSAFE_DEP(SDNode *N) {
+  // SoundSpec: passthrough pseudo with tied `$src = $dst`. Operand 0 is the
+  // value, operand 1 is the runtime i32 dependency-tag register value. The
+  // scope list lives on `!unsafe` metadata attached to the corresponding
+  // call/MI, not as an explicit operand.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_DEP, N->getValueType(0),
+                       {N->getOperand(0), N->getOperand(1)});
+}
+
 void SelectionDAGISel::Select_CONVERGENCECTRL_ANCHOR(SDNode *N) {
   CurDAG->SelectNodeTo(N, TargetOpcode::CONVERGENCECTRL_ANCHOR,
                        N->getValueType(0));
@@ -3341,6 +3350,8 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
   case ISD::DEACTIVATION_SYMBOL:
   case ISD::UNSAFE_ENTER:
   case ISD::UNSAFE_EXIT:
+  case ISD::UNSAFE_OPEN:
+  case ISD::UNSAFE_CLOSE:
     NodeToMatch->setNodeId(-1); // Mark selected.
     return;
   case ISD::AssertSext:
@@ -3384,6 +3395,9 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
     return;
   case ISD::UNSAFE_OUT:
     Select_UNSAFE_OUT(NodeToMatch);
+    return;
+  case ISD::UNSAFE_DEP:
+    Select_UNSAFE_DEP(NodeToMatch);
     return;
   case ISD::STACKMAP:
     Select_STACKMAP(NodeToMatch);

@@ -942,6 +942,27 @@ void X86AsmPrinter::LowerKCFI_CHECK(const MachineInstr &MI) {
   OutStreamer->emitLabel(Pass);
 }
 
+// Emit a 7-byte SoundSpec CFI marker: 0F 01 <ModRM> <imm32>.
+// The ModR/M byte selects between landing-pad (DEST = AE) and call-site
+// (SRC = AF) variants; in both cases mod=10 (disp32) and reg=5, so the
+// 32-bit displacement carries the CFI label.
+static void emitSoundSpecCFIMarker(MCStreamer &OutStreamer,
+                                   const MachineInstr &MI, uint8_t ModRM) {
+  const uint32_t Id = static_cast<uint32_t>(MI.getOperand(0).getImm());
+  const uint8_t Prefix[3] = {0x0F, 0x01, ModRM};
+  OutStreamer.emitBytes(
+      StringRef(reinterpret_cast<const char *>(Prefix), sizeof(Prefix)));
+  OutStreamer.emitIntValue(Id, /*Size=*/4);
+}
+
+void X86AsmPrinter::LowerSOUNDSPEC_CFI_DEST(const MachineInstr &MI) {
+  emitSoundSpecCFIMarker(*OutStreamer, MI, /*ModRM=*/0xAE);
+}
+
+void X86AsmPrinter::LowerSOUNDSPEC_CFI_SRC(const MachineInstr &MI) {
+  emitSoundSpecCFIMarker(*OutStreamer, MI, /*ModRM=*/0xAF);
+}
+
 void X86AsmPrinter::LowerASAN_CHECK_MEMACCESS(const MachineInstr &MI) {
   // FIXME: Make this work on non-ELF.
   if (!TM.getTargetTriple().isOSBinFormatELF()) {
@@ -2507,6 +2528,12 @@ void X86AsmPrinter::emitInstruction(const MachineInstr *MI) {
 
   case X86::KCFI_CHECK:
     return LowerKCFI_CHECK(*MI);
+
+  case X86::SOUNDSPEC_CFI_DEST:
+    return LowerSOUNDSPEC_CFI_DEST(*MI);
+
+  case X86::SOUNDSPEC_CFI_SRC:
+    return LowerSOUNDSPEC_CFI_SRC(*MI);
 
   case X86::ASAN_CHECK_MEMACCESS:
     return LowerASAN_CHECK_MEMACCESS(*MI);

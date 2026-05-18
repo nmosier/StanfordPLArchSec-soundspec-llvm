@@ -282,6 +282,10 @@ FunctionPass *createX86IndirectThunksPass();
 /// This pass replaces ret instructions with jmp's to __x86_return thunk.
 FunctionPass *createX86ReturnThunksPass();
 
+/// This pass implements the SoundSpec custom CFI scheme driven by the
+/// `soundspec_cfi(id)` function attribute.
+FunctionPass *createX86SoundSpecCFIPass();
+
 /// This pass insert wait instruction after X87 instructions which could raise
 /// fp exceptions when strict-fp enabled.
 FunctionPass *createX86InsertX87waitPass();
@@ -384,6 +388,7 @@ void initializeX86OptimizeLEAsLegacyPass(PassRegistry &);
 void initializeX86PartialReductionLegacyPass(PassRegistry &);
 void initializeX86PreTileConfigLegacyPass(PassRegistry &);
 void initializeX86ReturnThunksPass(PassRegistry &);
+void initializeX86SoundSpecCFIPass(PassRegistry &);
 void initializeX86SpeculativeExecutionSideEffectSuppressionPass(PassRegistry &);
 void initializeX86SpeculativeLoadHardeningPassPass(PassRegistry &);
 void initializeX86SuppressAPXForRelocationLegacyPass(PassRegistry &);

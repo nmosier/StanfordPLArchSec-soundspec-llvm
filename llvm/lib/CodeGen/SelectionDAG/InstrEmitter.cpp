@@ -1331,6 +1331,32 @@ EmitSpecialNode(SDNode *Node, bool IsClone, bool IsCloned,
     break;
   }
 
+  case ISD::UNSAFE_OPEN: {
+    // SoundSpec speculation-window barrier. Operand 0 is the chain, operand
+    // 1 is the i32 register value being marked. The pseudo takes the value
+    // as a single register use; no defs.
+    Register VReg = getVR(Node->getOperand(1), VRBaseMap);
+    BuildMI(*MBB, InsertPos, Node->getDebugLoc(),
+            TII->get(TargetOpcode::UNSAFE_OPEN))
+        .addReg(VReg);
+    break;
+  }
+  case ISD::UNSAFE_CLOSE: {
+    // SoundSpec speculation-window barrier producing an i32 register. The
+    // pseudo has a single virtual-register def and no uses; allocate a fresh
+    // vreg in the i32 register class chosen by the target.
+    MVT VT = Node->getSimpleValueType(0);
+    const TargetRegisterClass *RC = TLI->getRegClassFor(VT, Node->isDivergent());
+    Register VReg = MRI->createVirtualRegister(RC);
+    BuildMI(*MBB, InsertPos, Node->getDebugLoc(),
+            TII->get(TargetOpcode::UNSAFE_CLOSE), VReg);
+    SDValue Op(Node, 0);
+    bool isNew = VRBaseMap.try_emplace(Op, VReg).second;
+    (void)isNew; // Silence compiler warning.
+    assert(isNew && "Node emitted out of order - early");
+    break;
+  }
+
   case ISD::PSEUDO_PROBE: {
     unsigned TarOp = TargetOpcode::PSEUDO_PROBE;
     auto Guid = cast<PseudoProbeSDNode>(Node)->getGuid();

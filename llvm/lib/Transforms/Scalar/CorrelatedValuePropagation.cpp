@@ -47,6 +47,10 @@ using namespace llvm;
 
 #define DEBUG_TYPE "correlated-value-propagation"
 
+STATISTIC(NumSoundSpecCVPBailed,
+          "[soundspec] CVP runs skipped because the enclosing function "
+          "lacks the `unsafe` attribute and the pass would synthesize "
+          "speculation primitives outside any tracked scope");
 STATISTIC(NumPhis,      "Number of phis propagated");
 STATISTIC(NumPhiCommon, "Number of phis deleted via common incoming value");
 STATISTIC(NumSelects,   "Number of selects propagated");
@@ -1367,6 +1371,17 @@ static bool runImpl(Function &F, LazyValueInfo *LVI, DominatorTree *DT,
 
 PreservedAnalyses
 CorrelatedValuePropagationPass::run(Function &F, FunctionAnalysisManager &AM) {
+  // [soundspec] CVP rewrites edges and synthesizes new speculation
+  // primitives (assumes, narrowed compares, switch-to-branch folds) that
+  // would need per-edge scope plumbing to be sound. When the enclosing
+  // function is `unsafe`-attr the function attribute already subsumes
+  // every per-instruction scope, so the rewrites are verifier-safe.
+  // Otherwise, bail.
+  if (!F.hasFnAttribute(Attribute::Unsafe)) {
+    ++NumSoundSpecCVPBailed;
+    return PreservedAnalyses::all();
+  }
+
   LazyValueInfo *LVI = &AM.getResult<LazyValueAnalysis>(F);
   DominatorTree *DT = &AM.getResult<DominatorTreeAnalysis>(F);
 

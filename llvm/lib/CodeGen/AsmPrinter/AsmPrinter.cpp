@@ -2135,11 +2135,16 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::UNSAFE_IN:
       case TargetOpcode::UNSAFE_OUT:
       case TargetOpcode::UNSAFE_DEP:
+      case TargetOpcode::UNSAFE_OPEN:
+      case TargetOpcode::UNSAFE_CLOSE:
         // SoundSpec scope-region markers: purely meta. Stripped at
         // AsmPrinter (emit nothing). For UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP
         // the `Constraints = "$src = $dst"` tie at the .td level means
         // input and output share a physical register, so dropping
-        // them does not perturb register assignment.
+        // them does not perturb register assignment. UNSAFE_OPEN/CLOSE
+        // are barrier pseudos; their actual lowering to machine code is
+        // expected to happen in a target-specific pass before
+        // AsmPrinter.
         if (isVerbose()) {
           switch (MI.getOpcode()) {
           case TargetOpcode::UNSAFE_ENTER:
@@ -2156,6 +2161,12 @@ void AsmPrinter::emitFunctionBody() {
             break;
           case TargetOpcode::UNSAFE_DEP:
             OutStreamer->emitRawComment("UNSAFE_DEP");
+            break;
+          case TargetOpcode::UNSAFE_OPEN:
+            OutStreamer->emitRawComment("UNSAFE_OPEN");
+            break;
+          case TargetOpcode::UNSAFE_CLOSE:
+            OutStreamer->emitRawComment("UNSAFE_CLOSE");
             break;
           }
         }

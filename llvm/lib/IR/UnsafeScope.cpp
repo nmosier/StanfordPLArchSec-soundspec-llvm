@@ -48,70 +48,6 @@ UnsafeBuilderScope::~UnsafeBuilderScope() {
   Builder.SetUnsafeMetadata(nullptr);
 }
 
-/// Decode the `i32` scope ID stored as the single operand of an
-/// `!unsafe !N = !{i32 ID}` MDNode (created in
-/// `rustc_codegen_llvm::context::CodegenCx::soundspec_unsafe_md_node`).
-/// Returns `std::nullopt` if `MD` doesn't have the expected shape.
-std::optional<uint64_t> llvm::getUnsafeScopeID(const MDNode *MD) {
-  if (!MD || MD->getNumOperands() != 1)
-    return std::nullopt;
-  auto *ValueAsMD = dyn_cast<ValueAsMetadata>(MD->getOperand(0).get());
-  if (!ValueAsMD)
-    return std::nullopt;
-  auto *CI = dyn_cast<ConstantInt>(ValueAsMD->getValue());
-  if (!CI)
-    return std::nullopt;
-  return CI->getZExtValue();
-}
-
-std::optional<uint64_t> llvm::getUnsafeScopeID(const Instruction &I) {
-  if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I)) {
-    switch (II->getIntrinsicID()) {
-    case Intrinsic::unsafe_in:
-    case Intrinsic::unsafe_out:
-      assert(!I.getMetadata(LLVMContext::MD_unsafe));
-      return cast<ConstantInt>(II->getArgOperand(1))->getLimitedValue();
-    case Intrinsic::unsafe_enter:
-    case Intrinsic::unsafe_exit:
-      assert(!I.getMetadata(LLVMContext::MD_unsafe));
-      return cast<ConstantInt>(II->getArgOperand(0))->getLimitedValue();
-    }
-  }
-  return getUnsafeScopeID(I.getMetadata(LLVMContext::MD_unsafe));
-}
-
-bool llvm::isUnsafeScopeIntr(const Instruction &I, uint64_t *ID,
-                                   Intrinsic::ID IID) {
-  const auto *II = dyn_cast<IntrinsicInst>(&I);
-  if (!II)
-    return false;
-  if (II->getIntrinsicID() != IID)
-    return false;
-  if (ID) {
-    auto Idx = II->arg_size() - 1;
-    auto *Val = II->getOperand(Idx);
-    *ID = cast<ConstantInt>(Val)->getLimitedValue();
-  }
-  return true;  
-}
-
-bool llvm::isUnsafeScopeIntr(const Instruction &I, uint64_t UnsafeScopeID,
-                                   Intrinsic::ID IID) {
-  const auto *II = dyn_cast<IntrinsicInst>(&I);
-  if (!II || II->getIntrinsicID() != IID)
-    return false;
-  auto ScopeIdx = II->arg_size() - 1;
-  return cast<ConstantInt>(II->getArgOperand(ScopeIdx))->getLimitedValue() == UnsafeScopeID;
-}
-
-bool llvm::isUnsafeScopeIntr(const Instruction &I,
-                             ArrayRef<Intrinsic::ID> IIDs) {
-  auto *II = dyn_cast<IntrinsicInst>(&I);
-  if (!II)
-    return false;
-  return llvm::is_contained(IIDs, II->getIntrinsicID());
-}
-
 static void appendSuccessors(Instruction *I,
                             SmallVectorImpl<Instruction *> &Out) {
   if (Instruction *Succ = I->getNextNode()) {
@@ -130,43 +66,6 @@ static void appendPredecessors(Instruction *I,
     for (auto *Pred : llvm::predecessors(I->getParent()))
       Out.push_back(&Pred->back());
   }
-}
-
-bool unsafe::isReturnLike(const Instruction &I) {
-  if (!I.isTerminator())
-    return false;
-  if (isa<ReturnInst, ResumeInst>(&I))
-    return true;
-  auto *B = I.getParent();
-  return llvm::succ_empty(B);
-}
-
-static std::optional<uint64_t>
-getValueUnsafeScopeRec(const Value *V, SmallSet<const Value *, 4> &Seen) {
-  // If already seen, skip.
-  if (!Seen.insert(V).second)
-    return std::nullopt;
-
-  // Handle if it's an instruction with !unsafe metadata.
-  if (auto *I = dyn_cast<Instruction>(V)) {
-    if (auto ID = getUnsafeScopeID(I->getMetadata(LLVMContext::MD_unsafe)))
-      return ID;
-  }
-
-  // Otherwise, follow its uses.
-  if (auto *U = dyn_cast<User>(V)) {
-    for (Value *X : U->operands()) {
-      if (auto ID = getValueUnsafeScopeRec(X, Seen))
-        return ID;
-    }
-  }
-
-  return std::nullopt;
-}
-
-std::optional<uint64_t> llvm::getValueUnsafeScope(const Value *V) {
-  SmallSet<const Value *, 4> Seen;
-  return getValueUnsafeScopeRec(V, Seen);
 }
 
 static uint32_t getInt32(Metadata *MD) {
@@ -201,14 +100,6 @@ MDNode *unsafe::removeID(MDNode *MD, uint64_t ID) {
   sortUniqueMetadata(MDs);
   auto &Ctx = MD->getContext();
   return MDTuple::get(Ctx, MDs);
-}
-
-static bool isTerminatorSpeculationPrimitive(const Instruction &I) {
-  switch (I.getOpcode()) {
-    
-// catchret, cleanupret, resume, catchswitch
-
-  }
 }
 
 bool llvm::isSpeculationPrimitive(const Instruction &I) {
@@ -267,6 +158,9 @@ Value *llvm::getTransmittedOperand(Instruction &I) {
   if (auto *BI = dyn_cast<BranchInst>(&I))
     return BI->isConditional() ? BI->getCondition() : nullptr;
 
+  if (auto *Indbr = dyn_cast<IndirectBrInst>(&I))
+    return Indbr->getAddress();
+
   if (auto *CB = dyn_cast<CallBase>(&I))
     return CB->getCalledOperand();
 
@@ -310,6 +204,7 @@ static Metadata *getUnsafeMDElt(int ID, LLVMContext &Ctx) {
   return CAM;
 }
 
+// TODO: This and its users are ridiculously redundant. Refactor.
 static void enumerateDepsImpl(SmallVectorImpl<const Value *> &Todo, LLVMContext &Ctx, SmallVectorImpl<Metadata *> &IDs) {
   SmallSet<const Value *, 4> Seen;
   while (!Todo.empty()) {
@@ -366,6 +261,16 @@ MDNode *unsafe::enumerateTransmitterDeps(const Instruction &I) {
   return MDNode::get(Ctx, IDs);
 }
 
+MDNode *unsafe::enumerateDeps(const Value *V) {
+  LLVMContext &Ctx = V->getContext();
+  SmallVector<Metadata *> IDs;
+  SmallVector<const Value *> Todo;
+  Todo.push_back(V);
+  enumerateDepsImpl(Todo, Ctx, IDs);
+  sortUniqueMetadata(IDs);
+  return MDNode::get(Ctx, IDs);
+}
+
 MDNode *unsafe::enumerateScopeDeps(int ID, const Function &F) {
   LLVMContext &Ctx = F.getContext();
 
@@ -401,4 +306,74 @@ MDNode *unsafe::loopMetadata(const Loop &L) {
   for (auto *B : L.getBlocks())
     MD = mergeMetadata(MD, blockMetadata(*B));
   return MD->getNumOperands() ? MD : nullptr;
+}
+
+bool unsafe::isRelevantCall(const Instruction &I) {
+  if (!isa<CallBase>(&I))
+    return false;
+  auto *II = dyn_cast<IntrinsicInst>(&I);
+  if (!II)
+    return true;
+  if (II->isDebugOrPseudoInst() || II->isAssumeLikeIntrinsic())
+    return false;
+  return true;
+}
+
+unsigned unsafe::getNumDepOperands(const Instruction &I) {
+  assert(isTransmitter(I) || isRelevantCall(I));
+
+  // Handle calls.
+  if (auto *C = dyn_cast<CallBase>(&I))
+    return C->arg_size() + 1;
+
+  return I.getNumOperands();
+}
+
+Value *unsafe::getDepOperand(Instruction &I, unsigned Idx) {
+  assert(isTransmitter(I) || isRelevantCall(I));
+  assert(Idx < getNumDepOperands(I));
+
+  // Handle calls.
+  if (auto *C = dyn_cast<CallBase>(&I)) {
+    // First operand is the called operand.
+    if (Idx == 0)
+      return C->getCalledOperand();
+    // Followed by arguments.
+    return C->getArgOperand(Idx - 1);
+  }
+
+  return I.getOperand(Idx);
+}
+
+uint32_t unsafe::getScopeFromMetadata(const Metadata *MD) {
+  auto *CAM = cast<ConstantAsMetadata>(MD);
+  auto *C = CAM->getValue();
+  auto *CI = cast<ConstantInt>(C);
+  return CI->getZExtValue();
+}
+
+MDNode *unsafe::addIDToSet(MDNode *Set, Metadata *ID) {
+  auto &Ctx = Set->getContext();
+  return mergeMetadata(Set, MDNode::get(Ctx, {ID}));
+}
+
+void unsafe::addIDToMetadataSetInPlace(Instruction &I, StringRef Key,
+                                       Metadata *ID) {
+  auto *Set = I.getMetadata(Key);
+  Set = addIDToSet(Set, ID);
+  I.setMetadata(Key, Set);
+}
+
+uint32_t unsafe::getMaxScopeID(const Function &F) {
+  uint32_t Best = 0;
+  for (const Instruction &I : instructions(F)) {
+    auto *IDs = I.getMetadata(LLVMContext::MD_unsafe);
+    if (!IDs)
+      continue;
+    for (Metadata *ID : IDs->operands()) {
+      auto IntID = getInt32(ID);
+      Best = std::max<uint32_t>(Best, IntID);
+    }
+  }
+  return Best;
 }

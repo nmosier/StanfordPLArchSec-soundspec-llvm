@@ -70,6 +70,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/PatternMatch.h"
@@ -1179,6 +1180,31 @@ bool LoopIdiomRecognize::processLoopStridedStore(
 
   NewCall->setDebugLoc(TheStore->getDebugLoc());
 
+  // [soundspec] The synthesized memset/memset_pattern stands in for every
+  // in-loop store the idiom recognized. Union their SoundSpec scope tags
+  // onto the new call: if any source store was `!unsafe`, the merged
+  // call becomes `!unsafe`-union; only when every source was `!safe`
+  // does it stay `!safe`.
+  {
+    MDNode *MergedUnsafe = nullptr;
+    MDNode *AnySafe = nullptr;
+    bool EverySrcIsSafe = true;
+    for (Instruction *Src : Stores) {
+      if (MDNode *U = Src->getMetadata(LLVMContext::MD_unsafe)) {
+        MergedUnsafe = unsafe::mergeMetadata(MergedUnsafe, U);
+        EverySrcIsSafe = false;
+      } else if (MDNode *S = Src->getMetadata(LLVMContext::MD_safe)) {
+        AnySafe = S;
+      } else {
+        EverySrcIsSafe = false;
+      }
+    }
+    if (MergedUnsafe)
+      NewCall->setMetadata(LLVMContext::MD_unsafe, MergedUnsafe);
+    else if (EverySrcIsSafe && AnySafe)
+      NewCall->setMetadata(LLVMContext::MD_safe, AnySafe);
+  }
+
   if (MSSAU) {
     MemoryAccess *NewMemAcc = MSSAU->createMemoryAccessInBB(
         NewCall, nullptr, NewCall->getParent(), MemorySSA::BeforeTerminator);
@@ -1481,6 +1507,29 @@ bool LoopIdiomRecognize::processLoopStoreOfLoopLoad(
         AATags);
   }
   NewCall->setDebugLoc(TheStore->getDebugLoc());
+
+  // [soundspec] The synthesized memcpy/memmove stands in for both the
+  // in-loop load (transmitter) and store (speculation primitive). Union
+  // their SoundSpec scope tags onto the new call.
+  {
+    MDNode *MergedUnsafe = nullptr;
+    MDNode *AnySafe = nullptr;
+    bool EverySrcIsSafe = true;
+    for (Instruction *Src : {(Instruction *)TheLoad, (Instruction *)TheStore}) {
+      if (MDNode *U = Src->getMetadata(LLVMContext::MD_unsafe)) {
+        MergedUnsafe = unsafe::mergeMetadata(MergedUnsafe, U);
+        EverySrcIsSafe = false;
+      } else if (MDNode *S = Src->getMetadata(LLVMContext::MD_safe)) {
+        AnySafe = S;
+      } else {
+        EverySrcIsSafe = false;
+      }
+    }
+    if (MergedUnsafe)
+      NewCall->setMetadata(LLVMContext::MD_unsafe, MergedUnsafe);
+    else if (EverySrcIsSafe && AnySafe)
+      NewCall->setMetadata(LLVMContext::MD_safe, AnySafe);
+  }
 
   if (MSSAU) {
     MemoryAccess *NewMemAcc = MSSAU->createMemoryAccessInBB(

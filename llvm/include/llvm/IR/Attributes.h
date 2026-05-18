@@ -165,6 +165,8 @@ public:
   LLVM_ABI static Attribute getWithVScaleRangeArgs(LLVMContext &Context,
                                                    unsigned MinValue,
                                                    unsigned MaxValue);
+  LLVM_ABI static Attribute getWithSoundSpecCfi(LLVMContext &Context,
+                                                uint32_t Label);
   LLVM_ABI static Attribute getWithByValType(LLVMContext &Context, Type *Ty);
   LLVM_ABI static Attribute getWithStructRetType(LLVMContext &Context,
                                                  Type *Ty);
@@ -290,6 +292,9 @@ public:
   /// Returns the maximum value for the vscale_range attribute or std::nullopt
   /// when unknown.
   LLVM_ABI std::optional<unsigned> getVScaleRangeMax() const;
+
+  /// Returns the SoundSpec CFI label.
+  LLVM_ABI uint32_t getSoundSpecCfi() const;
 
   // Returns the unwind table kind.
   LLVM_ABI UWTableKind getUWTableKind() const;
@@ -1285,6 +1290,9 @@ public:
   /// This turns the unwind table kind into the form used internally in
   /// Attribute.
   LLVM_ABI AttrBuilder &addUWTableAttr(UWTableKind Kind);
+
+  /// Add the SoundSpec CFI label.
+  LLVM_ABI AttrBuilder &addSoundSpecCfiAttr(uint32_t Label);
 
   // This turns the allocator kind into the form used internally in Attribute.
   LLVM_ABI AttrBuilder &addAllocKindAttr(AllocFnKind Kind);
