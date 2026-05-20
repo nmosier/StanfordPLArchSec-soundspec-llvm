@@ -1458,6 +1458,24 @@ enum NodeType {
   UNSAFE_OPEN,
   UNSAFE_CLOSE,
 
+  /// SoundSpec shadow-token nodes. Lowered from
+  /// `i32 llvm.unsafe.shadow.gen(i32)`,
+  /// `i32 llvm.unsafe.shadow.dep(i32, i32)`, and
+  /// `void llvm.unsafe.shadow.xmit(i32)`.
+  /// UNSAFE_SHADOW_GEN: chain-carrying side-effecting token producer.
+  /// Operand 0 is the chain, operand 1 is the i32 id; results are
+  /// {i32 token, chain}.
+  /// UNSAFE_SHADOW_DEP: operands 0/1 are the two i32 tokens; single i32
+  /// result.
+  /// UNSAFE_SHADOW_XMIT: operand 0 is the chain, operand 1 is the i32
+  /// token; single chain result.
+  /// UNSAFE_SHADOW_ARG: operand 0 is the arbitrary-typed input value;
+  /// single i32 result. Pure passthrough modelled like UNSAFE_SHADOW_DEP.
+  UNSAFE_SHADOW_GEN,
+  UNSAFE_SHADOW_DEP,
+  UNSAFE_SHADOW_XMIT,
+  UNSAFE_SHADOW_ARG,
+
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for
   /// debugging purposes.
