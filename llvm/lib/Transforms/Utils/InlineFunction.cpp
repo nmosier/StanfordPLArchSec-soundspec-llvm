@@ -2853,7 +2853,7 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
           for (Instruction &I : BB) {
             stripScopeTags(I);
             if (needsScopeTag(I))
-              I.setMetadata(LLVMContext::MD_unsafe, CallUnsafeMD);
+              unsafe::setUnsafeScope(I, CallUnsafeMD);
           }
       } else if (CallSafeMD && CalleeUnsafe) {
         // Case B. The fresh scope MDNode and the dominating
@@ -2869,7 +2869,7 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
           for (Instruction &I : BB) {
             stripScopeTags(I);
             if (needsScopeTag(I))
-              I.setMetadata(LLVMContext::MD_unsafe, PreparedUnsafeMD);
+              unsafe::setUnsafeScope(I, PreparedUnsafeMD);
           }
       } else if (CallSafeMD && !CalleeUnsafe) {
         // Case C. Map each unique callee scope ID to one fresh caller ID,
@@ -2904,7 +2904,7 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
         for (BasicBlock &BB : inlinedRange())
           for (Instruction &I : BB)
             if (MDNode *MD = I.getMetadata(LLVMContext::MD_unsafe))
-              I.setMetadata(LLVMContext::MD_unsafe, remap(MD));
+              unsafe::setUnsafeScope(I, remap(MD));
       }
       // All other (call-site MD, callee attr) combinations: no-op.
     }

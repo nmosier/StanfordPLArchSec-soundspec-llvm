@@ -239,17 +239,6 @@ doPromotion(Function *F, FunctionAnalysisManager &FAM,
     const AttributeList &CallPAL = CB.getAttributes();
     IRBuilder<NoFolder> IRB(&CB);
 
-    // [soundspec] `!safe` on a CallBase has `arg_size + 1` operands per
-    // `unsafe::getNumDepOperands`: slot 0 = callee scope, slots 1..N =
-    // per-arg. Rebuild the operand list in lockstep with the new arg
-    // list: drop entries for dead args, replicate entries for promoted
-    // 1→N args, and keep entries for unmodified/varargs. The callee
-    // slot is preserved unchanged.
-    MDNode *OldSafeMD = CB.getMetadata(LLVMContext::MD_safe);
-    SmallVector<Metadata *, 8> NewSafeOps;
-    if (OldSafeMD)
-      NewSafeOps.push_back(OldSafeMD->getOperand(0).get()); // callee slot
-
     // Loop over the operands, inserting GEP and loads in the caller as
     // appropriate.
     auto *AI = CB.arg_begin();
@@ -260,8 +249,6 @@ doPromotion(Function *F, FunctionAnalysisManager &FAM,
       if (ArgIt == ArgsToPromote.end()) {
         Args.push_back(*AI); // Unmodified argument
         ArgAttrVec.push_back(CallPAL.getParamAttrs(ArgNo));
-        if (OldSafeMD)
-          NewSafeOps.push_back(OldSafeMD->getOperand(ArgNo + 1).get());
       } else if (!I->use_empty()) {
         Value *V = *AI;
         for (const auto &Pair : ArgIt->second) {
@@ -301,17 +288,10 @@ doPromotion(Function *F, FunctionAnalysisManager &FAM,
                               LLVMContext::MD_unsafe_spec});
           Args.push_back(LI);
           ArgAttrVec.push_back(AttributeSet());
-          // [soundspec] Replicate the original `!safe` arg slot for
-          // each of the N synthesized loads that replace this single
-          // argument. (Slot index is ArgNo + 1 because slot 0 is the
-          // callee.)
-          if (OldSafeMD)
-            NewSafeOps.push_back(OldSafeMD->getOperand(ArgNo + 1).get());
         }
       } else {
         assert(I->use_empty());
         DeadArgs.emplace_back(AI->get());
-        // [soundspec] Drop the corresponding `!safe` slot.
       }
     }
 
@@ -319,8 +299,6 @@ doPromotion(Function *F, FunctionAnalysisManager &FAM,
     for (; AI != CB.arg_end(); ++AI, ++ArgNo) {
       Args.push_back(*AI);
       ArgAttrVec.push_back(CallPAL.getParamAttrs(ArgNo));
-      if (OldSafeMD)
-        NewSafeOps.push_back(OldSafeMD->getOperand(ArgNo + 1).get());
     }
 
     SmallVector<OperandBundleDef, 1> OpBundles;
@@ -348,17 +326,6 @@ doPromotion(Function *F, FunctionAnalysisManager &FAM,
                              LLVMContext::MD_unsafe_init,
                              LLVMContext::MD_unsafe_xmit,
                              LLVMContext::MD_unsafe_spec});
-    // [soundspec] Rebuild `!safe` so it has `arg_size + 1` operands per
-    // `unsafe::getNumDepOperands`: slot 0 = callee, slots 1.. per-arg.
-    // The wholesale copyMetadata above would have copied the stale
-    // per-old-arg list.
-    if (OldSafeMD) {
-      assert(NewSafeOps.size() == Args.size() + 1 &&
-             "rebuilt !safe must have arg_size + 1 operands "
-             "(callee slot + per-arg slots)");
-      NewCS->setMetadata(LLVMContext::MD_safe,
-                         MDNode::get(F->getContext(), NewSafeOps));
-    }
     Args.clear();
     ArgAttrVec.clear();
 

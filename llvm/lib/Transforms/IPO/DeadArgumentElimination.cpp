@@ -906,15 +906,6 @@ bool DeadArgumentEliminationPass::removeDeadStuffFromFunction(Function *F) {
         AttributeFuncs::typeIncompatible(NRetTy, CallPAL.getRetAttrs()));
     AttributeSet RetAttrs = AttributeSet::get(F->getContext(), RAttrs);
 
-    // [soundspec] `!safe` on a CallBase has `arg_size + 1` operands per
-    // `unsafe::getNumDepOperands`: slot 0 is the callee scope, slots
-    // 1..N are per-arg. Track surviving slots so we can rebuild it
-    // after the wholesale copyMetadata below.
-    MDNode *OldSafeMD = CB.getMetadata(LLVMContext::MD_safe);
-    SmallVector<Metadata *, 8> NewSafeOps;
-    if (OldSafeMD)
-      NewSafeOps.push_back(OldSafeMD->getOperand(0).get()); // callee slot
-
     // Declare these outside of the loops, so we can reuse them for the second
     // loop, which loops the varargs.
     auto *I = CB.arg_begin();
@@ -924,8 +915,6 @@ bool DeadArgumentEliminationPass::removeDeadStuffFromFunction(Function *F) {
     for (unsigned E = FTy->getNumParams(); Pi != E; ++I, ++Pi)
       if (ArgAlive[Pi]) {
         Args.push_back(*I);
-        if (OldSafeMD)
-          NewSafeOps.push_back(OldSafeMD->getOperand(Pi + 1).get());
         // Get original parameter attributes, but skip return attributes.
         AttributeSet Attrs = CallPAL.getParamAttrs(Pi);
         if (NRetTy != RetTy && Attrs.hasAttribute(Attribute::Returned)) {
@@ -947,8 +936,6 @@ bool DeadArgumentEliminationPass::removeDeadStuffFromFunction(Function *F) {
     for (auto *E = CB.arg_end(); I != E; ++I, ++Pi) {
       Args.push_back(*I);
       ArgAttrVec.push_back(CallPAL.getParamAttrs(Pi));
-      if (OldSafeMD)
-        NewSafeOps.push_back(OldSafeMD->getOperand(Pi + 1).get());
     }
 
     // Reconstruct the AttributesList based on the vector we constructed.
@@ -982,15 +969,6 @@ bool DeadArgumentEliminationPass::removeDeadStuffFromFunction(Function *F) {
                              LLVMContext::MD_unsafe_init,
                              LLVMContext::MD_unsafe_xmit,
                              LLVMContext::MD_unsafe_spec});
-    // [soundspec] Rebuild `!safe` so it has `arg_size + 1` operands per
-    // `unsafe::getNumDepOperands`: slot 0 = callee, slots 1.. per-arg.
-    if (OldSafeMD) {
-      assert(NewSafeOps.size() == Args.size() + 1 &&
-             "rebuilt !safe must have arg_size + 1 operands "
-             "(callee slot + per-arg slots)");
-      NewCB->setMetadata(LLVMContext::MD_safe,
-                         MDNode::get(F->getContext(), NewSafeOps));
-    }
     Args.clear();
     ArgAttrVec.clear();
 

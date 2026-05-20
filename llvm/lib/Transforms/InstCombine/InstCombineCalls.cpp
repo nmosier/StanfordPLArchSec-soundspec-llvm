@@ -4237,6 +4237,15 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
           *II, Builder.CreateZExtOrTrunc(II->getArgOperand(0), II->getType()));
     return nullptr;
   }
+  case Intrinsic::unsafe_shadow_embed: {
+    auto IsBlockingUser = [II](const User *U) {
+      auto *C = dyn_cast<CallBase>(U);
+      return C && C->hasArgument(II);
+    };
+    if (none_of(II->users(), IsBlockingUser))
+      return replaceInstUsesWith(*II, II->getArgOperand(0));
+    break;
+  }
   default: {
     // Handle target specific intrinsics
     std::optional<Instruction *> V = targetInstCombineIntrinsic(*II);

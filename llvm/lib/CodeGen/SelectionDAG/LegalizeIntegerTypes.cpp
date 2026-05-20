@@ -337,6 +337,7 @@ void DAGTypeLegalizer::PromoteIntegerResult(SDNode *N, unsigned ResNo) {
   case ISD::UNSAFE_IN:
   case ISD::UNSAFE_OUT:
   case ISD::UNSAFE_DEP:
+  case ISD::UNSAFE_SHADOW_EMBED:
     Res = PromoteIntRes_UNSAFE_IN_OUT(N);
     break;
 
@@ -2082,6 +2083,9 @@ bool DAGTypeLegalizer::PromoteIntegerOperand(SDNode *N, unsigned OpNo) {
   case ISD::FAKE_USE:
     Res = PromoteIntOp_FAKE_USE(N);
     break;
+  case ISD::UNSAFE_SHADOW_ARG:
+    Res = PromoteIntOp_UNSAFE_SHADOW_ARG(N);
+    break;
   case ISD::INSERT_VECTOR_ELT:
     Res = PromoteIntOp_INSERT_VECTOR_ELT(N, OpNo);
     break;
@@ -3067,7 +3071,8 @@ void DAGTypeLegalizer::ExpandIntegerResult(SDNode *N, unsigned ResNo) {
   case ISD::ARITH_FENCE:  SplitRes_ARITH_FENCE(N, Lo, Hi); break;
   case ISD::UNSAFE_IN:
   case ISD::UNSAFE_OUT:
-  case ISD::UNSAFE_DEP:   SplitRes_UNSAFE_IN_OUT(N, Lo, Hi); break;
+  case ISD::UNSAFE_DEP:
+  case ISD::UNSAFE_SHADOW_EMBED: SplitRes_UNSAFE_IN_OUT(N, Lo, Hi); break;
   case ISD::MERGE_VALUES: SplitRes_MERGE_VALUES(N, ResNo, Lo, Hi); break;
   case ISD::SELECT:       SplitRes_Select(N, Lo, Hi); break;
   case ISD::SELECT_CC:    SplitRes_SELECT_CC(N, Lo, Hi); break;
@@ -5567,6 +5572,9 @@ bool DAGTypeLegalizer::ExpandIntegerOperand(SDNode *N, unsigned OpNo) {
   case ISD::FAKE_USE:
     Res = ExpandOp_FAKE_USE(N);
     break;
+  case ISD::UNSAFE_SHADOW_ARG:
+    Res = ExpandIntOp_UNSAFE_SHADOW_ARG(N);
+    break;
   case ISD::INSERT_VECTOR_ELT: Res = ExpandOp_INSERT_VECTOR_ELT(N); break;
   case ISD::SCALAR_TO_VECTOR:  Res = ExpandOp_SCALAR_TO_VECTOR(N); break;
   case ISD::SPLAT_VECTOR:      Res = ExpandIntOp_SPLAT_VECTOR(N); break;
@@ -6466,6 +6474,30 @@ SDValue DAGTypeLegalizer::PromoteIntOp_FAKE_USE(SDNode *N) {
       DAG.getNode(ISD::ANY_EXTEND, dl,
                   TLI.getTypeToTransformTo(*DAG.getContext(), InVT1), V1);
   return DAG.getNode(N->getOpcode(), dl, N->getValueType(0), V0, VPromoted);
+}
+
+// SoundSpec: `UNSAFE_SHADOW_ARG` is a meta pseudo (stripped at AsmPrinter),
+// so the operand's actual value is irrelevant for codegen — we only need
+// to keep the SDNode well-typed through legalization. Promote any
+// sub-legal integer operand via ANY_EXTEND.
+SDValue DAGTypeLegalizer::PromoteIntOp_UNSAFE_SHADOW_ARG(SDNode *N) {
+  SDLoc dl(N);
+  SDValue Arg = N->getOperand(0);
+  EVT InVT = Arg.getValueType();
+  SDValue ArgPromoted = DAG.getNode(
+      ISD::ANY_EXTEND, dl,
+      TLI.getTypeToTransformTo(*DAG.getContext(), InVT), Arg);
+  return DAG.getNode(N->getOpcode(), dl, N->getValueType(0), ArgPromoted);
+}
+
+// SoundSpec: see comment above on the promote handler. For an over-wide
+// integer operand, take the low half of the expansion. The framework will
+// recursively expand again if `Lo` is itself still illegal (e.g. i256 →
+// i128 → i64).
+SDValue DAGTypeLegalizer::ExpandIntOp_UNSAFE_SHADOW_ARG(SDNode *N) {
+  SDValue Lo, Hi;
+  GetExpandedInteger(N->getOperand(0), Lo, Hi);
+  return DAG.getNode(N->getOpcode(), SDLoc(N), N->getValueType(0), Lo);
 }
 
 SDValue DAGTypeLegalizer::PromoteIntOp_EXTRACT_SUBVECTOR(SDNode *N) {

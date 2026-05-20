@@ -2610,6 +2610,51 @@ void SelectionDAGISel::Select_UNSAFE_DEP(SDNode *N) {
                        {N->getOperand(0), N->getOperand(1)});
 }
 
+void SelectionDAGISel::Select_UNSAFE_SHADOW_GEN(SDNode *N) {
+  // SoundSpec shadow-token producer: chain-carrying side-effecting pseudo
+  // with `$tok = $dst` tied at the MIR level. The ISD node has chain at
+  // operand 0, tok at operand 1, scope (TargetConstant) at operand 2;
+  // results are {i32, chain}. `InstrEmitter::countOperands` requires the
+  // chain to be the LAST operand of the MachineSDNode, so reorder
+  // {tok, scope, chain} when handing off to SelectNodeTo.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_GEN,
+                       N->getValueType(0), N->getValueType(1),
+                       {N->getOperand(1), N->getOperand(2), N->getOperand(0)});
+}
+
+void SelectionDAGISel::Select_UNSAFE_SHADOW_DEP(SDNode *N) {
+  // SoundSpec shadow-token combiner: tied `$x = $dst` passthrough, `$y` is
+  // an extra register use kept alive but not tied.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_DEP, N->getValueType(0),
+                       {N->getOperand(0), N->getOperand(1)});
+}
+
+void SelectionDAGISel::Select_UNSAFE_SHADOW_XMIT(SDNode *N) {
+  // SoundSpec shadow-token sink: chain-carrying pseudo with a single i32
+  // register use. The ISD node has chain at operand 0 and the token at
+  // operand 1, but `InstrEmitter::countOperands` requires the chain to be
+  // the LAST operand of the MachineSDNode (it sniffs MVT::Other at the
+  // tail). Swap them when handing off to SelectNodeTo.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_XMIT, N->getValueType(0),
+                       {N->getOperand(1), N->getOperand(0)});
+}
+
+void SelectionDAGISel::Select_UNSAFE_SHADOW_ARG(SDNode *N) {
+  // SoundSpec shadow-token derived from an arbitrary-typed input. Single
+  // operand passthrough; result is the fixed-type i32 shadow token. No
+  // tied operand — see Target.td note on UNSAFE_SHADOW_ARG.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_ARG, N->getValueType(0),
+                       N->getOperand(0));
+}
+
+void SelectionDAGISel::Select_UNSAFE_SHADOW_EMBED(SDNode *N) {
+  // SoundSpec passthrough: tied `$val = $dst` (both share operand 0's
+  // type); `$tok` is an extra i32 register use kept alive but not tied.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_EMBED,
+                       N->getValueType(0),
+                       {N->getOperand(0), N->getOperand(1)});
+}
+
 void SelectionDAGISel::Select_CONVERGENCECTRL_ANCHOR(SDNode *N) {
   CurDAG->SelectNodeTo(N, TargetOpcode::CONVERGENCECTRL_ANCHOR,
                        N->getValueType(0));
@@ -3398,6 +3443,21 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
     return;
   case ISD::UNSAFE_DEP:
     Select_UNSAFE_DEP(NodeToMatch);
+    return;
+  case ISD::UNSAFE_SHADOW_GEN:
+    Select_UNSAFE_SHADOW_GEN(NodeToMatch);
+    return;
+  case ISD::UNSAFE_SHADOW_DEP:
+    Select_UNSAFE_SHADOW_DEP(NodeToMatch);
+    return;
+  case ISD::UNSAFE_SHADOW_XMIT:
+    Select_UNSAFE_SHADOW_XMIT(NodeToMatch);
+    return;
+  case ISD::UNSAFE_SHADOW_ARG:
+    Select_UNSAFE_SHADOW_ARG(NodeToMatch);
+    return;
+  case ISD::UNSAFE_SHADOW_EMBED:
+    Select_UNSAFE_SHADOW_EMBED(NodeToMatch);
     return;
   case ISD::STACKMAP:
     Select_STACKMAP(NodeToMatch);

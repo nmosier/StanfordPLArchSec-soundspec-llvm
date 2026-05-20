@@ -7868,6 +7868,20 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
     if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
       Check(!UnsafeMD && !SafeMD, "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata", &I);
     }
+
+    if (UnsafeMD)
+      Check(UnsafeMD->getNumOperands() == 1, "Expected exactly one !unsafe scope", &I, UnsafeMD);
+
+    // @llvm.unsafe.shadow.gen's 2nd arg should match its !unsafe scope.
+    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
+      Check(UnsafeMD, "@llvm.unsafe.shadow.gen should have !unsafe metadata", &I);
+      Check(
+          II->getArgOperand(1) ==
+              cast<ConstantAsMetadata>(UnsafeMD->getOperand(0))->getValue(),
+          "@llvm.unafe.shadow.gen's 2nd arg should match its !unsafe metadata",
+          II, UnsafeMD);
+    }
+
   }
 
   // Verify each unsafe scope individually.

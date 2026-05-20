@@ -133,6 +133,8 @@ STATISTIC(NumRetsDup, "Number of return instructions duplicated");
 STATISTIC(NumDbgValueMoved, "Number of debug value instructions moved");
 STATISTIC(NumSelectsExpanded, "Number of selects turned into branches");
 STATISTIC(NumStoreExtractExposed, "Number of store(extractelement) exposed");
+STATISTIC(NumSoundSpecSelectToBranchBails,
+          "Number of select-to-branch expansions skipped under SoundSpec");
 
 static cl::opt<bool> DisableBranchOpts(
     "disable-cgp-branch-opts", cl::Hidden, cl::init(false),
@@ -7691,6 +7693,14 @@ bool CodeGenPrepare::optimizeFunnelShift(IntrinsicInst *Fsh) {
 /// If we have a SelectInst that will likely profit from branch prediction,
 /// turn it into a branch.
 bool CodeGenPrepare::optimizeSelectInst(SelectInst *SI) {
+  // SoundSpec: this transformation fabricates a new conditional branch
+  // (on the frozen select condition) — a speculation primitive whose
+  // !safe/!unsafe metadata we'd have to invent. The original branch the
+  // select feeds is preserved unchanged; the new one isn't. Bail
+  // entirely under SoundSpec rather than guess the right scope tag.
+  ++NumSoundSpecSelectToBranchBails;
+  return false;
+
   if (DisableSelectToBranch)
     return false;
 

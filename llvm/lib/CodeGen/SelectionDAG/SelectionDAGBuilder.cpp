@@ -7113,6 +7113,74 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     DAG.setRoot(Node.getValue(1));
     return;
   }
+  case Intrinsic::unsafe_shadow_gen: {
+    // SoundSpec shadow-token producer. Chain-carrying so it can't be
+    // CSE'd or DCE'd. Results are {i32 token, chain}; SDNode operands
+    // are {chain, i32 tok, TargetConstant i32 scope_id}. The scope id
+    // arg is an ImmArg, materialized as a TargetConstant so it stays as
+    // an immediate operand on the MachineInstr.
+    SDValue Tok = getValue(I.getArgOperand(0));
+    auto *Scope = cast<ConstantInt>(I.getArgOperand(1));
+    SDValue ScopeOp =
+        DAG.getTargetConstant(Scope->getZExtValue(), sdl, MVT::i32);
+    SDVTList VTs = DAG.getVTList(MVT::i32, MVT::Other);
+    SDValue Node =
+        DAG.getNode(ISD::UNSAFE_SHADOW_GEN, sdl, VTs, getRoot(), Tok, ScopeOp);
+    setValue(&I, Node.getValue(0));
+    DAG.setRoot(Node.getValue(1));
+    return;
+  }
+  case Intrinsic::unsafe_shadow_dep: {
+    // SoundSpec shadow-token combiner. Pure: no chain, two i32 inputs to
+    // one i32 output.
+    SDValue X = getValue(I.getArgOperand(0));
+    SDValue Y = getValue(I.getArgOperand(1));
+    setValue(&I, DAG.getNode(ISD::UNSAFE_SHADOW_DEP, sdl, MVT::i32, X, Y));
+    return;
+  }
+  case Intrinsic::unsafe_shadow_xmit: {
+    // SoundSpec shadow-token sink. Chain-carrying so it can't be DCE'd.
+    SDValue X = getValue(I.getArgOperand(0));
+    SDValue Node =
+        DAG.getNode(ISD::UNSAFE_SHADOW_XMIT, sdl, MVT::Other, getRoot(), X);
+    DAG.setRoot(Node);
+    return;
+  }
+  case Intrinsic::unsafe_shadow_arg: {
+    // SoundSpec shadow-token derived from an arbitrary input value. Pure:
+    // no chain, just an i32 result from a value of any type.
+    SDValue Arg = getValue(I.getArgOperand(0));
+    setValue(&I, DAG.getNode(ISD::UNSAFE_SHADOW_ARG, sdl, MVT::i32, Arg));
+    return;
+  }
+  case Intrinsic::unsafe_shadow_embed: {
+    // SoundSpec passthrough: result type matches operand 0. Operand 1 is
+    // the i32 shadow token, kept as an extra register use. For aggregate
+    // types (e.g. `{ ptr, i64 }`), `getValue` returns a MERGE_VALUES with
+    // one SDAG value per flattened field, so we emit one
+    // UNSAFE_SHADOW_EMBED per field and stitch them back together with a
+    // MERGE_VALUES — otherwise the new SDNode would have just a single
+    // result and downstream visitors (e.g. `visitRet`) would assert
+    // accessing the higher-indexed values.
+    SDValue Val = getValue(I.getArgOperand(0));
+    SDValue Tok = getValue(I.getArgOperand(1));
+    unsigned NumVals = Val.getNode()->getNumValues();
+    if (NumVals == 1) {
+      setValue(&I,
+               DAG.getNode(ISD::UNSAFE_SHADOW_EMBED, sdl, Val.getValueType(),
+                           Val, Tok));
+    } else {
+      SmallVector<SDValue, 4> Embedded;
+      Embedded.reserve(NumVals);
+      for (unsigned Idx = 0; Idx < NumVals; ++Idx) {
+        SDValue Field(Val.getNode(), Idx);
+        Embedded.push_back(DAG.getNode(ISD::UNSAFE_SHADOW_EMBED, sdl,
+                                       Field.getValueType(), Field, Tok));
+      }
+      setValue(&I, DAG.getMergeValues(Embedded, sdl));
+    }
+    return;
+  }
   case Intrinsic::fma:
     setValue(&I, DAG.getNode(
                      ISD::FMA, sdl, getValue(I.getArgOperand(0)).getValueType(),

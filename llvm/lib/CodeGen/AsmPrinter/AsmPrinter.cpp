@@ -2137,14 +2137,19 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::UNSAFE_DEP:
       case TargetOpcode::UNSAFE_OPEN:
       case TargetOpcode::UNSAFE_CLOSE:
+      case TargetOpcode::UNSAFE_SHADOW_GEN:
+      case TargetOpcode::UNSAFE_SHADOW_DEP:
+      case TargetOpcode::UNSAFE_SHADOW_XMIT:
+      case TargetOpcode::UNSAFE_SHADOW_ARG:
+      case TargetOpcode::UNSAFE_SHADOW_EMBED:
         // SoundSpec scope-region markers: purely meta. Stripped at
         // AsmPrinter (emit nothing). For UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP
-        // the `Constraints = "$src = $dst"` tie at the .td level means
-        // input and output share a physical register, so dropping
-        // them does not perturb register assignment. UNSAFE_OPEN/CLOSE
-        // are barrier pseudos; their actual lowering to machine code is
-        // expected to happen in a target-specific pass before
-        // AsmPrinter.
+        // and UNSAFE_SHADOW_GEN/DEP, the `Constraints = "$src = $dst"`
+        // (or `$id`/`$x = $dst`) tie at the .td level means input and
+        // output share a physical register, so dropping them does not
+        // perturb register assignment. UNSAFE_OPEN/CLOSE are barrier
+        // pseudos; their actual lowering to machine code is expected to
+        // happen in a target-specific pass before AsmPrinter.
         if (isVerbose()) {
           switch (MI.getOpcode()) {
           case TargetOpcode::UNSAFE_ENTER:
@@ -2167,6 +2172,21 @@ void AsmPrinter::emitFunctionBody() {
             break;
           case TargetOpcode::UNSAFE_CLOSE:
             OutStreamer->emitRawComment("UNSAFE_CLOSE");
+            break;
+          case TargetOpcode::UNSAFE_SHADOW_GEN:
+            OutStreamer->emitRawComment("UNSAFE_SHADOW_GEN");
+            break;
+          case TargetOpcode::UNSAFE_SHADOW_DEP:
+            OutStreamer->emitRawComment("UNSAFE_SHADOW_DEP");
+            break;
+          case TargetOpcode::UNSAFE_SHADOW_XMIT:
+            OutStreamer->emitRawComment("UNSAFE_SHADOW_XMIT");
+            break;
+          case TargetOpcode::UNSAFE_SHADOW_ARG:
+            OutStreamer->emitRawComment("UNSAFE_SHADOW_ARG");
+            break;
+          case TargetOpcode::UNSAFE_SHADOW_EMBED:
+            OutStreamer->emitRawComment("UNSAFE_SHADOW_EMBED");
             break;
           }
         }

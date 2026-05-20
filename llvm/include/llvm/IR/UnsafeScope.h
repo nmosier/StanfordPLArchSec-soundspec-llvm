@@ -78,6 +78,8 @@ MDNode *prepareCallSiteToUnsafeFnForInlining(CallBase *C);
 /// It removes llvm.unsafe.shadow.* intrinsics from the callee.
 void postProcessUnsafeFnAfterInlining(Function &F);
 
+void setUnsafeScope(Instruction &I, MDNode *ID);
+
 }
 
 bool isSpeculationPrimitive(const Instruction &I);
@@ -111,8 +113,10 @@ public:
   const DomSetType &dominanceSet() const { return DomSet; }
 
   // Get the values consumed by each instruction in the dominance set.
-  DenseMap<Instruction *, SmallSet<Value *, 4>> computeConsumptionFrontier(); 
+  DenseMap<Instruction *, SmallSet<Value *, 4>> computeConsumptionFrontier();
 };
+
+void replaceUnsafeScopeWith(Function &F, MDNode *OldID, MDNode *NewID);
 
 } // namespace llvm
 

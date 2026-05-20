@@ -70,6 +70,9 @@ using namespace llvm;
 
 #define DEBUG_TYPE "x86-isel"
 
+STATISTIC(NumSoundSpecCmpArithAtomicBails,
+          "Number of cmp-arith atomicrmw expansions skipped under SoundSpec");
+
 static cl::opt<int> ExperimentalPrefInnermostLoopAlignment(
     "x86-experimental-pref-innermost-loop-alignment", cl::init(4),
     cl::desc(
@@ -32255,6 +32258,16 @@ void X86TargetLowering::emitBitTestAtomicRMWIntrinsic(AtomicRMWInst *AI) const {
 
 static bool shouldExpandCmpArithRMWInIR(AtomicRMWInst *AI) {
   using namespace llvm::PatternMatch;
+  // SoundSpec: this expansion replaces the atomicrmw + icmp pair with a
+  // call to an `llvm.x86.atomic.*.cc` intrinsic — which the SoundSpec
+  // verifier treats as a relevant call requiring !safe / !unsafe
+  // metadata. The source atomicrmw isn't itself a transmitter (per
+  // `unsafe::isRelevantCall`), so it carries no SoundSpec context we can
+  // soundly propagate. Bail and let the regular X86 backend lower the
+  // atomicrmw directly via `lock`-prefixed instructions.
+  ++NumSoundSpecCmpArithAtomicBails;
+  return false;
+
   if (!AI->hasOneUse())
     return false;
 

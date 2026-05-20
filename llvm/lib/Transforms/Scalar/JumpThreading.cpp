@@ -88,6 +88,11 @@ STATISTIC(NumSoundSpecUnfoldSelectBailed,
           "the enclosing function lacks the `unsafe` attribute and the "
           "unfold would synthesize a conditional branch outside any "
           "tracked scope");
+STATISTIC(NumSoundSpecPartialLoadPREBails,
+          "[soundspec] simplifyPartiallyRedundantLoad calls skipped "
+          "because the load carries !unsafe metadata; the partial-PRE "
+          "transform would move the load into a predecessor block "
+          "without the dominating shadow.gen for its scope");
 
 static cl::opt<unsigned>
 BBDuplicateThreshold("jump-threading-threshold",
@@ -1223,6 +1228,17 @@ static bool isOpDefinedInBlock(Value *Op, BasicBlock *BB) {
 /// This is an important optimization that encourages jump threading, and needs
 /// to be run interlaced with other jump threading tasks.
 bool JumpThreadingPass::simplifyPartiallyRedundantLoad(LoadInst *LoadI) {
+  // SoundSpec: this transformation moves the load into one or more
+  // predecessor blocks (partial PRE), leaving the corresponding
+  // `shadow.gen` orphaned in the original block. The moved load no
+  // longer has a dominating gen for its `!unsafe` scope and the
+  // verifier rejects the function. Bail when the load is in any
+  // unsafe scope.
+  if (LoadI->getMetadata(LLVMContext::MD_unsafe)) {
+    ++NumSoundSpecPartialLoadPREBails;
+    return false;
+  }
+
   // Don't hack volatile and ordered loads.
   if (!LoadI->isUnordered()) return false;
 

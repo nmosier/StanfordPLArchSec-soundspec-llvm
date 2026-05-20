@@ -401,6 +401,8 @@ private:
   SDValue PromoteIntOp_EXTRACT_SUBVECTOR(SDNode *N);
   SDValue PromoteIntOp_INSERT_SUBVECTOR(SDNode *N);
   SDValue PromoteIntOp_FAKE_USE(SDNode *N);
+  SDValue PromoteIntOp_UNSAFE_SHADOW_ARG(SDNode *N);
+  SDValue ExpandIntOp_UNSAFE_SHADOW_ARG(SDNode *N);
   SDValue PromoteIntOp_CONCAT_VECTORS(SDNode *N);
   SDValue PromoteIntOp_ScalarOp(SDNode *N);
   SDValue PromoteIntOp_SELECT(SDNode *N, unsigned OpNo);

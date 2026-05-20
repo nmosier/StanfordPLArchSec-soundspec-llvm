@@ -257,6 +257,11 @@ bool DwarfEHPrepare::InsertUnwindResumeCalls() {
       if (DISubprogram *SP = F.getSubprogram())
         CI->setDebugLoc(DILocation::get(SP->getContext(), 0, 0, SP));
     CI->setCallingConv(RewindFunctionCallingConv);
+    // SoundSpec: the SoundSpec verifier requires every relevant call to
+    // carry !safe or !unsafe metadata. This call is a compiler-synthesized
+    // unwinder helper, not user code with a meaningful unsafe scope, so
+    // mark it !safe.
+    CI->setMetadata(LLVMContext::MD_safe, MDNode::get(Ctx, {}));
 
     // We never expect _Unwind_Resume to return.
     CI->setDoesNotReturn();
@@ -300,6 +305,8 @@ bool DwarfEHPrepare::InsertUnwindResumeCalls() {
     if (DISubprogram *SP = F.getSubprogram())
       CI->setDebugLoc(DILocation::get(SP->getContext(), 0, 0, SP));
   CI->setCallingConv(RewindFunctionCallingConv);
+  // SoundSpec: see comment on the single-resume path above.
+  CI->setMetadata(LLVMContext::MD_safe, MDNode::get(Ctx, {}));
 
   // We never expect _Unwind_Resume to return.
   CI->setDoesNotReturn();

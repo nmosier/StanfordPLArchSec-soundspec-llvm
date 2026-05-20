@@ -1463,8 +1463,8 @@ enum NodeType {
   /// `i32 llvm.unsafe.shadow.dep(i32, i32)`, and
   /// `void llvm.unsafe.shadow.xmit(i32)`.
   /// UNSAFE_SHADOW_GEN: chain-carrying side-effecting token producer.
-  /// Operand 0 is the chain, operand 1 is the i32 id; results are
-  /// {i32 token, chain}.
+  /// Operand 0 is the chain, operand 1 is the i32 input token, operand 2
+  /// is a TargetConstant i32 scope id; results are {i32 token, chain}.
   /// UNSAFE_SHADOW_DEP: operands 0/1 are the two i32 tokens; single i32
   /// result.
   /// UNSAFE_SHADOW_XMIT: operand 0 is the chain, operand 1 is the i32

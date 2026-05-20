@@ -656,6 +656,19 @@ static StoreInst *combineStoreToNewValue(InstCombinerImpl &IC, StoreInst &SI,
       // All of these directly apply.
       NewStore->setMetadata(ID, N);
       break;
+    // [soundspec] Propagate !safe + !unsafe + !unsafe.xmit +
+    // !unsafe.init + !unsafe.spec from the source store onto the
+    // retyped clone. The clone is supposed to be a same-semantics
+    // retype, so the scope tag(s) carry over directly. (Stores are
+    // both transmitters and speculation primitives, so all five tags
+    // can legitimately appear.)
+    case LLVMContext::MD_safe:
+    case LLVMContext::MD_unsafe:
+    case LLVMContext::MD_unsafe_xmit:
+    case LLVMContext::MD_unsafe_init:
+    case LLVMContext::MD_unsafe_spec:
+      NewStore->setMetadata(ID, N);
+      break;
     case LLVMContext::MD_invariant_load:
     case LLVMContext::MD_nonnull:
     case LLVMContext::MD_noundef:
@@ -1673,28 +1686,26 @@ bool InstCombinerImpl::mergeStoreIntoSuccessor(StoreInst &SI) {
   if (AATags)
     NewSI->setAAMetadata(AATags.merge(OtherStore->getAAMetadata()));
 
-  // [soundspec] The merged store stands in for both originals; union their
-  // SoundSpec scope tags. If either side carried `!unsafe`, the result is
-  // `!unsafe` with the merged scope set (so a `!safe` + `!unsafe` mix
-  // becomes `!unsafe`, conservatively keeping protection). Only when both
-  // sides were `!safe` is the merged store `!safe`.
-  auto mergeScopeKind = [&](unsigned Kind) {
-    MDNode *A = SI.getMetadata(Kind);
-    MDNode *B = OtherStore->getMetadata(Kind);
-    if (A || B)
-      NewSI->setMetadata(Kind, unsafe::mergeMetadata(A, B));
-  };
+  // [soundspec] The merged store stands in for both originals. For
+  // `!unsafe` we cannot just union the operand sets (that would create
+  // a store claiming membership in two scopes, only one of which has a
+  // dominating `shadow.gen` on each incoming path — verifier rejects).
+  // Instead, when both sides carry single-scope `!unsafe` MDs, rename
+  // one scope to the other across the whole function via
+  // `replaceUnsafeScopeWith`. After the rename both predecessor paths'
+  // gens (and any other tagged instructions) carry the unified scope,
+  // and the merged store can carry that single scope tag.
   MDNode *SIUnsafe = SI.getMetadata(LLVMContext::MD_unsafe);
   MDNode *OSUnsafe = OtherStore->getMetadata(LLVMContext::MD_unsafe);
   if (SIUnsafe || OSUnsafe) {
+    if (SIUnsafe && OSUnsafe)
+      replaceUnsafeScopeWith(*SI.getFunction(), OSUnsafe, SIUnsafe);
     NewSI->setMetadata(LLVMContext::MD_unsafe,
-                       unsafe::mergeMetadata(SIUnsafe, OSUnsafe));
+                       SIUnsafe ? SIUnsafe : OSUnsafe);
   } else if (MDNode *SISafe = SI.getMetadata(LLVMContext::MD_safe)) {
     if (OtherStore->getMetadata(LLVMContext::MD_safe))
       NewSI->setMetadata(LLVMContext::MD_safe, SISafe);
   }
-  mergeScopeKind(LLVMContext::MD_unsafe_xmit);
-  mergeScopeKind(LLVMContext::MD_unsafe_spec);
 
   // Nuke the old stores.
   eraseInstFromFunction(SI);

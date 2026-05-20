@@ -604,3 +604,25 @@ void unsafe::postProcessUnsafeFnAfterInlining(Function &F) {
   for (Instruction *I : ToRemove)
     I->eraseFromParent();
 }
+
+void llvm::replaceUnsafeScopeWith(Function &F, MDNode *OldID, MDNode *NewID) {
+  if (OldID == NewID)
+    return;
+  for (auto &I : instructions(F)) {
+    if (I.getMetadata(LLVMContext::MD_unsafe) != OldID)
+      continue;
+    I.setMetadata(LLVMContext::MD_unsafe, NewID);
+    auto *II = dyn_cast<IntrinsicInst>(&I);
+    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
+      assert(II->getArgOperand(1) == cast<ConstantAsMetadata>(OldID->getOperand(0))->getValue());
+      II->setArgOperand(1, cast<ConstantAsMetadata>(NewID->getOperand(0))->getValue());
+    }
+  }
+}
+
+void unsafe::setUnsafeScope(Instruction &I, MDNode *ID) {
+  I.setMetadata(LLVMContext::MD_unsafe, ID);
+  if (auto *II = dyn_cast<IntrinsicInst>(&I);
+      II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen)
+    II->setArgOperand(1, cast<ConstantAsMetadata>(ID->getOperand(0))->getValue());
+}
