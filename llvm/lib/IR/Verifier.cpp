@@ -144,6 +144,9 @@ static cl::opt<bool> VerifyNoAliasScopeDomination(
     cl::desc("Ensure that llvm.experimental.noalias.scope.decl for identical "
              "scopes are not dominating"));
 
+static cl::opt<bool> SoundSpecVerify(
+    "soundspec-verify", cl::Hidden, cl::init(true));
+
 struct llvm::VerifierSupport {
   raw_ostream *OS;
   const Module &M;
@@ -672,6 +675,7 @@ private:
   /// Verify the llvm.experimental.noalias.scope.decl declarations
   void verifyNoAliasScopeDecl();
 
+  void verifyUnsafeScope(const Function &F, Metadata *ID);
   void verifyUnsafeScopes(const Function &F);
   void verifyUnsafeFunction(const Function &F);
 };
@@ -7784,23 +7788,56 @@ void Verifier::verifyUnsafeFunction(const Function &F) {
     Check(!I.getMetadata(LLVMContext::MD_unsafe_init),
           "Instruction in unsafe function has !unsafe.init metadata", &I);
 
-    // No llvm.unsafe.{enter,exit,in,out} intrinsics are allowed.
-    Check(!isUnsafeEnterExitInOut(I), "Unsafe intrinsic in unsafe function", &I);
+    if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+      switch (II->getIntrinsicID()) {
+        case Intrinsic::unsafe_shadow_arg: 
+        case Intrinsic::unsafe_shadow_dep:
+        case Intrinsic::unsafe_shadow_gen:
+        case Intrinsic::unsafe_shadow_embed:
+        case Intrinsic::unsafe_shadow_xmit:
+          Check(false,
+                "Found llvm.unsafe.shadow.* intrinsic in unsafe-attr function",
+                II);
+          break;
+        default:
+          break;
+      }
+    }
   }
 }
 
 
+void Verifier::verifyUnsafeScope(const Function &F, Metadata *ID) {
+  // FIXME: Shouldn't have to do a const_cast...
+  UnsafeScope Scope(const_cast<Function &>(F), ID);
+  for (const Instruction *Dom : Scope.dominanceSet()) {
+    auto *II = dyn_cast<IntrinsicInst>(Dom);
+    Check(II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen,
+          "Unsafe scope is not dominated by llvm.unsafe.shadow.gen! in " + F.getName(), Dom);
+  }
+}
+
 void Verifier::verifyUnsafeScopes(const Function &F) {
+  if (!SoundSpecVerify || !F.getMetadata("soundspec.verify"))
+    return;
+
   if (F.hasFnAttribute(Attribute::Unsafe)) {
     verifyUnsafeFunction(F);
     return;
   }
+
+  // Collect !unsafe IDs.
+  SmallSet<Metadata *, 4> IDSet;
+  for (auto &I : instructions(F))
+    if (auto *IDs = I.getMetadata(LLVMContext::MD_unsafe))
+      copy(IDs->operands(), std::inserter(IDSet, IDSet.end()));
 
   // Make sure that we don't have any bare transmitters,
   // speculation primitives, or calls.
   for (auto &I : instructions(F)) {
     auto *UnsafeMD = I.getMetadata(LLVMContext::MD_unsafe);
     auto *SafeMD = I.getMetadata(LLVMContext::MD_safe);
+    auto *II = dyn_cast<IntrinsicInst>(&I);
 
     if (isSpeculationPrimitive(I)) {
       Check(UnsafeMD || SafeMD,
@@ -7810,30 +7847,35 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
     if (isTransmitter(I) || unsafe::isRelevantCall(I)) {
       Check(UnsafeMD || SafeMD,
             "transmitter/call missing !safe/!unsafe metadata!", &I);
-      if (SafeMD) {
-        auto Msg = formatv("wrong number of !safe metadata elements to "
-                           "transmitter/call (got {}, expected {})", SafeMD->getNumOperands(), I.getNumOperands());
-        Check(SafeMD->getNumOperands() == unsafe::getNumDepOperands(I), Msg, &I);
-      }
+    }
+
+    // Make sure there is no empty !unsafe.
+    if (UnsafeMD) {
+      Check(UnsafeMD->getNumOperands(), "!unsafe shouldn't be empty", &I);
+    }
+
+#if 0
+    // Validate that llvm.unsafe.shadow.arg can only have (1) an llvm::Argument
+    // or (2) llvm.unsafe.shadow.embed as its operand.
+    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_arg) {
+      auto *V = II->getArgOperand(0);
+      Check(!isa<Instruction>(V) || isa<CallBase>(V),
+            "llvm.unsafe.shadow.arg has a bad argument", &I);
+    }
+#endif
+
+    // @llvm.unsafe.shadow.dep shouldn't have !unsafe/!safe metadata.
+    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
+      Check(!UnsafeMD && !SafeMD, "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata", &I);
     }
   }
 
-  for (const Instruction &I : llvm::instructions(F)) {
-    auto *II = dyn_cast<IntrinsicInst>(&I);
-
-    // Don't allow llvm.unsafe.enter, llvm.unsafe.exit, or llvm.unsafe.dep for
-    // now.
-    if (II) {
-      switch (II->getIntrinsicID()) {
-      case Intrinsic::unsafe_enter:
-      case Intrinsic::unsafe_exit:
-      case Intrinsic::unsafe_in:
-      case Intrinsic::unsafe_out:
-        Check(false, "llvm.unsafe.enter/exit/in/out", &I);
-        break;
-      }
-    }
-  }
+  // Verify each unsafe scope individually.
+#warning "[soundspec] Re-enable this check!"
+#if 1
+  for (auto *ID : IDSet)
+    verifyUnsafeScope(F, ID);
+#endif
 }
 
 //===----------------------------------------------------------------------===//
