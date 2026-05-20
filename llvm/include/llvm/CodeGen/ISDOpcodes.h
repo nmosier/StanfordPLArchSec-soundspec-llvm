@@ -1471,10 +1471,14 @@ enum NodeType {
   /// token; single chain result.
   /// UNSAFE_SHADOW_ARG: operand 0 is the arbitrary-typed input value;
   /// single i32 result. Pure passthrough modelled like UNSAFE_SHADOW_DEP.
+  /// UNSAFE_SHADOW_EMBED: operand 0 is the arbitrary-typed value, operand
+  /// 1 is the i32 shadow token; single result matches operand 0's type.
+  /// Identity passthrough on operand 0.
   UNSAFE_SHADOW_GEN,
   UNSAFE_SHADOW_DEP,
   UNSAFE_SHADOW_XMIT,
   UNSAFE_SHADOW_ARG,
+  UNSAFE_SHADOW_EMBED,
 
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for
