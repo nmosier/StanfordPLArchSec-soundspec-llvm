@@ -19,6 +19,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/IR/PatternMatch.h"
 #include <iterator>
 #include <cassert>
 #include <optional>
@@ -512,4 +513,91 @@ void UnsafeScope::computeScopeSet(Function &F, Metadata *ID) {
       if (Seen.contains(&I))
         Scope.push_back(&I);
   assert(Seen.size() >= Scope.size()); // RPO doesn't include unreachable blocks...
+}
+
+MDNode *unsafe::prepareCallSiteToUnsafeFnForInlining(CallBase *C) {
+  assert(C->hasFnAttr(Attribute::Unsafe));
+  assert(!C->getMetadata(LLVMContext::MD_unsafe));
+  assert(C->getMetadata(LLVMContext::MD_safe));
+
+  auto &F = *C->getFunction();
+  auto &Ctx = F.getContext();
+
+  // Strip all @llvm.unsafe.shadow.embed(arg, dep) calls.
+  IRBuilder<> IRB(C);
+  Value *Deps = nullptr;
+  for (Use &Arg : C->args()) {
+    auto *ArgII = dyn_cast<IntrinsicInst>(Arg.get());
+    if (!ArgII || ArgII->getIntrinsicID() != Intrinsic::unsafe_shadow_embed)
+      continue;
+    Arg.set(ArgII->getArgOperand(0));
+    auto *Dep = ArgII->getArgOperand(1);
+    // Don't do this:
+    // ArgII->eraseFromParent();
+    // because we can DCE it, and another call might have gotten it via CSE.
+    if (Deps) {
+      Deps = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_dep, {Deps, Dep});
+    } else {
+      Deps = Dep;
+    }
+  }
+
+  // Get fresh unsafe scope ID.
+  auto IntID = getMaxScopeID(F) + 1;
+  Metadata *ID = ConstantAsMetadata::get(IRB.getInt32(IntID));
+  MDNode *MD = MDNode::get(Ctx, {ID});
+
+  // Create Gen intrinsic.
+  if (!Deps)
+    Deps = IRB.getInt32(0); // TODO: Should this be a more specific number, like the scope ID?
+  auto *Gen = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_gen, {Deps});
+  Gen->setMetadata(LLVMContext::MD_unsafe, MD);
+
+  // If the call had a return value, then we should expect it be wrapped in
+  // llvm.unsafe.shadow.arg, unless it's dead.
+  if (!C->getType()->isVoidTy()) {
+    // Rewrite any llvm.unsafe.shadow.arg uses.
+    for (Use &U : make_early_inc_range(C->uses())) {
+      auto *II = dyn_cast<IntrinsicInst>(U.getUser());
+      if (!II || II->getIntrinsicID() != Intrinsic::unsafe_shadow_arg)
+        continue;
+      II->replaceAllUsesWith(Gen);
+      II->eraseFromParent();
+    }
+  }
+
+  // The actual inliner should stamp all speculation primitives, transmitters, and relevant calls with this.
+  return MD;
+}
+
+void unsafe::postProcessUnsafeFnAfterInlining(Function &F) {
+  assert(F.hasFnAttribute(Attribute::Unsafe));
+  
+  // The easiest approach might just be to replace everything with
+  // constants and let DCE remove the rest.
+  auto &Ctx = F.getContext();
+  auto *DummyInt = ConstantInt::get(IntegerType::get(Ctx, 32), 0);
+  SmallVector<Instruction *> ToRemove;
+  for (auto &I : instructions(F)) {
+    auto *II = dyn_cast<IntrinsicInst>(&I);
+    if (!II)
+      continue;
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::unsafe_shadow_arg:
+    case Intrinsic::unsafe_shadow_dep:
+    case Intrinsic::unsafe_shadow_gen:
+      II->replaceAllUsesWith(DummyInt);
+      ToRemove.push_back(II);
+      break;
+    case Intrinsic::unsafe_shadow_embed:
+      II->replaceAllUsesWith(II->getArgOperand(0));
+      ToRemove.push_back(II);
+      break;
+    default:
+      break;
+    }
+  }
+
+  for (Instruction *I : ToRemove)
+    I->eraseFromParent();
 }

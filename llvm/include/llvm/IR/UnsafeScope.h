@@ -65,7 +65,20 @@ uint32_t getMaxScopeID(const Function &F);
 
 bool hasID(const Instruction &I, Metadata *ID);
 
-} // namespace unsafe
+/// Call this before inlining a !safe-metadata call to an unsafe-attr function.
+/// It inserts and removes some intrinsics directly before the call,
+/// and removes some intrinsics right after the call.
+/// It allocates a new unsafe scope and returns it.
+/// All transmitters (isTransmitter), speculation primitives
+/// (isSpeculationPrimitive), and relevant calls (isRelevantCall)
+/// should be then tagged with the returned unsafe scope.
+MDNode *prepareCallSiteToUnsafeFnForInlining(CallBase *C);
+
+/// Call this after inlining a non-unsafe-attr function into an unsafe-attr function.
+/// It removes llvm.unsafe.shadow.* intrinsics from the callee.
+void postProcessUnsafeFnAfterInlining(Function &F);
+
+}
 
 bool isSpeculationPrimitive(const Instruction &I);
 Value *getTransmittedOperand(Instruction &I);
