@@ -1647,6 +1647,49 @@ def int_unsafe_close : Intrinsic<
     [],
     [IntrConvergent]>;
 
+// SoundSpec shadow-token intrinsics. Used to give producers without a
+// natural data input (e.g. `alloca !unsafe`) something for
+// `llvm.unsafe.dep` to thread through.
+//
+// `i32 llvm.unsafe.shadow.gen(i32 %id)` materializes a fresh shadow
+// token from a scope id (often a constant). Has side effects via
+// `IntrInaccessibleMemOnly` so it survives DCE and is never CSE'd or
+// hoisted: each call produces a distinct token even with identical
+// arguments. NOT speculatable.
+def int_unsafe_shadow_gen : DefaultAttrsIntrinsic<
+    [llvm_i32_ty],
+    [llvm_i32_ty],
+    [IntrInaccessibleMemOnly]>;
+
+// `i32 llvm.unsafe.shadow.dep(i32 %x, i32 %y)` combines two shadow
+// tokens into a single token. Pure (CSE-equivalent for equal operand
+// pairs) and `Commutative` so CSE treats `dep(a,b)` and `dep(b,a)`
+// as equal.
+def int_unsafe_shadow_dep : PureIntrinsic<
+    [llvm_i32_ty],
+    [llvm_i32_ty, llvm_i32_ty],
+    [Commutative]>;
+
+// `i32 llvm.unsafe.shadow.arg.<T>(<T> %arg)` produces an i32 shadow
+// token derived from an arbitrary-typed input value. Pure: no memory,
+// freely speculatable, deterministic — two `shadow.arg` calls with
+// equal (and same-typed) arguments are CSE-equivalent.
+def int_unsafe_shadow_arg : PureIntrinsic<
+    [llvm_i32_ty],
+    [llvm_any_ty],
+    []>;
+
+// `void llvm.unsafe.shadow.xmit(i32 %x)` is the side-effecting sink
+// that keeps shadow-token computations alive against DCE.
+// `IntrInaccessibleMemOnly` gives it the minimum side effects needed
+// to survive DCE without forcing a full memory barrier; ordinary
+// loads/stores may still be reordered around it. NOT speculatable,
+// NOT convergent (request explicitly if either is wanted).
+def int_unsafe_shadow_xmit : DefaultAttrsIntrinsic<
+    [],
+    [llvm_i32_ty],
+    [IntrInaccessibleMemOnly]>;
+
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //
 def int_init_trampoline : DefaultAttrsIntrinsic<
