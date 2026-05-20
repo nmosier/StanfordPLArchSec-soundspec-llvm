@@ -95,6 +95,7 @@ public:
     case Intrinsic::umul_fix_sat:
     case Intrinsic::fma:
     case Intrinsic::fmuladd:
+    case Intrinsic::unsafe_shadow_dep:
       return true;
     default:
       return false;
