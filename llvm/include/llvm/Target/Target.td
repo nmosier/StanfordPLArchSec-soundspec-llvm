@@ -1477,6 +1477,56 @@ def UNSAFE_CLOSE : StandardPseudoInstruction {
   let isMeta = true;
 }
 
+// SoundSpec shadow-token meta pseudos. GEN/DEP tie `$dst` to the first input
+// register so register allocation reuses the same physical register and no
+// spurious code is left behind once they're stripped. XMIT has no def, just
+// a use plus `hasSideEffects` so DCE can't kill it. `isMeta = true` on all
+// three means AsmPrinter emits no bytes for them.
+def UNSAFE_SHADOW_GEN : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$id);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let Constraints = "$id = $dst";
+  let isMeta = true;
+}
+def UNSAFE_SHADOW_DEP : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$x, unknown:$y);
+  let AsmString = "";
+  let hasSideEffects = false;
+  let Constraints = "$x = $dst";
+  let isMeta = true;
+}
+def UNSAFE_SHADOW_XMIT : StandardPseudoInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$x);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let isMeta = true;
+}
+// Polymorphic input ($arg, any type) → i32 $dst. No `$arg = $dst` tie:
+// the operand sizes can differ, and the entire shadow chain is
+// `isMeta`-stripped at AsmPrinter so the dst register is never observed.
+def UNSAFE_SHADOW_ARG : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$arg);
+  let AsmString = "";
+  let hasSideEffects = false;
+  let isMeta = true;
+}
+// Polymorphic passthrough: $val (any type) gets returned as $dst (same
+// type). $tok is the i32 shadow token kept as an extra use. The
+// `$val = $dst` tie is safe because both share the same type.
+def UNSAFE_SHADOW_EMBED : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$val, unknown:$tok);
+  let AsmString = "";
+  let hasSideEffects = false;
+  let Constraints = "$val = $dst";
+  let isMeta = true;
+}
+
 def STACKMAP : StandardPseudoInstruction {
   let OutOperandList = (outs);
   let InOperandList = (ins i64imm:$id, i32imm:$nbytes, variable_ops);

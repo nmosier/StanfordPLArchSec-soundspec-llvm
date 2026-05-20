@@ -146,6 +146,17 @@ HANDLE_TARGET_OPCODE(UNSAFE_DEP)
 HANDLE_TARGET_OPCODE(UNSAFE_OPEN)
 HANDLE_TARGET_OPCODE(UNSAFE_CLOSE)
 
+/// SoundSpec shadow-token meta pseudos. UNSAFE_SHADOW_GEN/DEP are pure
+/// passthroughs with `$dst` tied to the first input (so register allocation
+/// reuses that register). UNSAFE_SHADOW_XMIT is the chain-carrying sink with
+/// side effects (must survive DCE). All three are `isMeta = true` and
+/// stripped at AsmPrinter — they emit no code.
+HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_GEN)
+HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_DEP)
+HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_XMIT)
+HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_ARG)
+HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_EMBED)
+
 /// Pseudo probe
 HANDLE_TARGET_OPCODE(PSEUDO_PROBE)
 
