@@ -479,6 +479,7 @@ private:
   void Select_UNSAFE_SHADOW_DEP(SDNode *N);
   void Select_UNSAFE_SHADOW_XMIT(SDNode *N);
   void Select_UNSAFE_SHADOW_ARG(SDNode *N);
+  void Select_UNSAFE_SHADOW_EMBED(SDNode *N);
 
   void Select_CONVERGENCECTRL_ANCHOR(SDNode *N);
   void Select_CONVERGENCECTRL_ENTRY(SDNode *N);
