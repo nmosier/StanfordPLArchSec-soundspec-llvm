@@ -3,7 +3,7 @@
 
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Metadata.h"
-#include <optional>
+#include "llvm/ADT/SmallSet.h"
 
 namespace llvm {
 
@@ -71,6 +71,35 @@ bool isSpeculationPrimitive(const Instruction &I);
 Value *getTransmittedOperand(Instruction &I);
 const Value *getTransmittedOperand(const Instruction &I);
 bool isTransmitter(const Instruction &I);
+
+class UnsafeScope {
+  using DomSetType = SmallSet<Instruction *, 2>;
+
+  Function &F;
+
+public:
+  Metadata *ID;
+
+private:
+  DomSetType DomSet;
+  SmallVector<Instruction *> Scope;
+
+  template <typename OutputIt>
+  void getScopeDomSet(Function &F, Metadata *ID, OutputIt Out);
+
+  void computeScopeSet(Function &F, Metadata *ID);
+
+public:
+  UnsafeScope(Function &F, Metadata *ID) : F(F), ID(ID) { computeScopeSet(F, ID); }
+
+  /// Returns the list of instructions in the scope, in reverse postorder.
+  ArrayRef<Instruction *> instructions() const { return Scope; }
+
+  const DomSetType &dominanceSet() const { return DomSet; }
+
+  // Get the values consumed by each instruction in the dominance set.
+  DenseMap<Instruction *, SmallSet<Value *, 4>> computeConsumptionFrontier(); 
+};
 
 } // namespace llvm
 

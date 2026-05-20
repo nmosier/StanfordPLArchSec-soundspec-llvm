@@ -318,10 +318,13 @@ bool unsafe::isRelevantCall(const Instruction &I) {
     return false;
   switch (II->getIntrinsicID()) {
   case Intrinsic::unsafe_shadow_dep:
-  case Intrinsic::unsafe_shadow_gen:
   case Intrinsic::unsafe_shadow_xmit:
   case Intrinsic::unsafe_shadow_arg:
+  case Intrinsic::unsafe_shadow_embed:
     return false;
+    // We should mark llvm.unsafe.shadow.gen with the !unsafe scope it belongs to.
+  case Intrinsic::unsafe_shadow_gen:
+    return true;
   }
   if (!II->mayHaveSideEffects() && !II->mayReadOrWriteMemory())
     return false;
@@ -390,4 +393,123 @@ uint32_t unsafe::getMaxScopeID(const Function &F) {
 bool unsafe::hasID(const Instruction &I, Metadata *ID) {
   auto *IDs = I.getMetadata(LLVMContext::MD_unsafe);
   return IDs && is_contained(IDs->operands(), ID);
+}
+
+DenseMap<Instruction *, SmallSet<Value *, 4>> UnsafeScope::computeConsumptionFrontier() {
+  using ValSet = SmallSet<Value *, 4>;
+  struct InOut {
+    ValSet In;
+    ValSet Out;
+  };
+  auto Snapshot = [](const InOut &Set) {
+    return Set.In.size() + Set.Out.size();
+  };
+  DenseMap<Instruction *, InOut> Map;
+  bool Changed;
+  do {
+    Changed = false;
+
+    // Do data-flow in postorder, since this is a backwards
+    // data-flow.
+    for (Instruction *I : reverse(instructions())) {
+      // Ignore PHIs.
+      if (isa<PHINode>(I))
+        continue;
+
+      // Compute OUT from successors' INs.
+      auto &X = Map[I];
+      auto Orig = Snapshot(X);
+      if (auto *Succ = I->getNextNode()) {
+        X.Out = Map[Succ].In;
+      } else {
+        // This is a termiantor.
+        // We need to compute the IN from each block along PHIs.
+        auto *B = I->getParent();
+        for (auto *Succ : successors(B)) {
+          auto Set = Map[&*Succ->getFirstNonPHIIt()].In;
+          auto Range = llvm::reverse(
+              llvm::make_range(Succ->begin(), Succ->getFirstNonPHIIt()));
+          for (auto &SuccI : Range) {
+            auto *SuccPHI = cast<PHINode>(&SuccI);
+            auto *V = SuccPHI->getIncomingValueForBlock(B);
+            if (Set.erase(SuccPHI))
+              Set.insert(V);
+          }
+          llvm::copy(Set, std::inserter(X.Out, X.Out.end()));
+        }
+      }
+
+      // Transfer back across instruction.
+      X.In = X.Out;
+      X.In.erase(I); // Remove any def.
+                     // Add any uses.
+      copy(I->operands(), std::inserter(X.In, X.In.end()));
+
+      auto New = Snapshot(X);
+      Changed |= (Orig != New);
+    }
+  } while (Changed);
+
+  DenseMap<Instruction *, SmallSet<Value *, 4>> Result;
+  for (auto &[I, Set] : Map)
+    if (DomSet.contains(I))
+      Result[I] = Set.In;
+  return Result;
+}
+
+template <typename OutputIt>
+void UnsafeScope::getScopeDomSet(Function &F, Metadata *ID, OutputIt Out) {
+  SmallVector<Instruction *> Todo;
+  SmallSet<Instruction *, 4> Seen;
+  Todo.push_back(&F.getEntryBlock().front());
+  auto HasID = [ID](const Instruction *I) -> bool {
+    return unsafe::hasID(*I, ID);
+  };
+  while (!Todo.empty()) {
+    auto *I = Todo.pop_back_val();
+    if (!Seen.insert(I).second)
+      continue;
+    if (HasID(I))
+      continue;
+    if (auto *Succ = I->getNextNode()) {
+      Todo.push_back(Succ);
+      continue;
+    }
+    for (auto *Succ : successors(I->getParent()))
+      Todo.push_back(&Succ->front());
+  }
+  copy_if(Seen, Out, HasID);
+}
+
+void UnsafeScope::computeScopeSet(Function &F, Metadata *ID) {
+  // First, compute whichID-unsafe are reachable from the function entry.
+  getScopeDomSet(F, ID, std::inserter(DomSet, DomSet.end()));
+
+  // Now, compute which instructions may reach an interior ID-unsafe
+  // instruction.
+  SmallVector<Instruction *> Todo;
+  SmallSet<Instruction *, 8> Seen;
+  for (Instruction &I : llvm::instructions(F))
+    if (unsafe::hasID(I, ID))
+      Todo.push_back(&I);
+  while (!Todo.empty()) {
+    auto *I = Todo.pop_back_val();
+    if (!Seen.insert(I).second)
+      continue;
+    if (DomSet.contains(I))
+      continue;
+    if (auto *Pred = I->getPrevNode()) {
+      Todo.push_back(Pred);
+      continue;
+    }
+    for (auto *Pred : predecessors(I->getParent()))
+      Todo.push_back(&Pred->back());
+  }
+
+  // Copy scope instructions to scope vector in reverse postorder.
+  for (auto *B : ReversePostOrderTraversal(&F))
+    for (auto &I : *B)
+      if (Seen.contains(&I))
+        Scope.push_back(&I);
+  assert(Seen.size() >= Scope.size()); // RPO doesn't include unreachable blocks...
 }
