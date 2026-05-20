@@ -1651,15 +1651,17 @@ def int_unsafe_close : Intrinsic<
 // natural data input (e.g. `alloca !unsafe`) something for
 // `llvm.unsafe.dep` to thread through.
 //
-// `i32 llvm.unsafe.shadow.gen(i32 %id)` materializes a fresh shadow
-// token from a scope id (often a constant). Has side effects via
-// `IntrInaccessibleMemOnly` so it survives DCE and is never CSE'd or
-// hoisted: each call produces a distinct token even with identical
-// arguments. NOT speculatable.
+// `i32 llvm.unsafe.shadow.gen(i32 %tok, i32 immarg %scope_id)`
+// materializes a fresh shadow token from an existing token plus a
+// distinct compile-time scope id. The immediate second operand makes
+// two `shadow.gen` calls in different scopes structurally distinct, so
+// transformations like SimplifyCFG's hoist-common-instructions don't
+// merge them. Has side effects via `IntrInaccessibleMemOnly` (survives
+// DCE; not CSE'd). NOT speculatable.
 def int_unsafe_shadow_gen : DefaultAttrsIntrinsic<
     [llvm_i32_ty],
-    [llvm_i32_ty],
-    [IntrInaccessibleMemOnly]>;
+    [llvm_i32_ty, llvm_i32_ty],
+    [IntrInaccessibleMemOnly, ImmArg<ArgIndex<1>>]>;
 
 // `i32 llvm.unsafe.shadow.dep(i32 %x, i32 %y)` combines two shadow
 // tokens into a single token. Pure (CSE-equivalent for equal operand

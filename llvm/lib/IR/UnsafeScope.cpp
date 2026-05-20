@@ -547,10 +547,13 @@ MDNode *unsafe::prepareCallSiteToUnsafeFnForInlining(CallBase *C) {
   Metadata *ID = ConstantAsMetadata::get(IRB.getInt32(IntID));
   MDNode *MD = MDNode::get(Ctx, {ID});
 
-  // Create Gen intrinsic.
+  // Create Gen intrinsic. The second arg is the scope-id immediate that
+  // makes each gen structurally distinct per scope (so SimplifyCFG /
+  // CSE don't merge gens from different scopes).
   if (!Deps)
     Deps = IRB.getInt32(0); // TODO: Should this be a more specific number, like the scope ID?
-  auto *Gen = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_gen, {Deps});
+  auto *Gen = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_gen,
+                                  {Deps, IRB.getInt32(IntID)});
   Gen->setMetadata(LLVMContext::MD_unsafe, MD);
 
   // If the call had a return value, then we should expect it be wrapped in
