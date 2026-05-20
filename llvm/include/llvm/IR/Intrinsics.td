@@ -1679,6 +1679,19 @@ def int_unsafe_shadow_arg : PureIntrinsic<
     [llvm_any_ty],
     []>;
 
+// `<T> llvm.unsafe.shadow.embed.<T>(<T> %value, i32 %tok)` is a
+// passthrough that embeds a shadow token alongside an arbitrary-typed
+// value — it returns `%value` unchanged at runtime, but the call
+// preserves the dataflow link from `%tok` to consumers of the result
+// for SoundSpec analysis. Pure (CSE/DCE-eligible). When `%tok` is a
+// `Constant` (e.g., the result of `shadow.gen` on a constant scope
+// id that's folded to an immediate), `simplifyBinaryIntrinsic` folds
+// the call to `%value` directly.
+def int_unsafe_shadow_embed : PureIntrinsic<
+    [llvm_any_ty],
+    [LLVMMatchType<0>, llvm_i32_ty],
+    []>;
+
 // `void llvm.unsafe.shadow.xmit(i32 %x)` is the side-effecting sink
 // that keeps shadow-token computations alive against DCE.
 // `IntrInaccessibleMemOnly` gives it the minimum side effects needed
