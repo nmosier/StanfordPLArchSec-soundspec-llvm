@@ -316,6 +316,15 @@ bool unsafe::isRelevantCall(const Instruction &I) {
     return true;
   if (II->isDebugOrPseudoInst() || II->isAssumeLikeIntrinsic())
     return false;
+  switch (II->getIntrinsicID()) {
+  case Intrinsic::unsafe_shadow_dep:
+  case Intrinsic::unsafe_shadow_gen:
+  case Intrinsic::unsafe_shadow_xmit:
+  case Intrinsic::unsafe_shadow_arg:
+    return false;
+  }
+  if (!II->mayHaveSideEffects() && !II->mayReadOrWriteMemory())
+    return false;
   return true;
 }
 
@@ -376,4 +385,9 @@ uint32_t unsafe::getMaxScopeID(const Function &F) {
     }
   }
   return Best;
+}
+
+bool unsafe::hasID(const Instruction &I, Metadata *ID) {
+  auto *IDs = I.getMetadata(LLVMContext::MD_unsafe);
+  return IDs && is_contained(IDs->operands(), ID);
 }

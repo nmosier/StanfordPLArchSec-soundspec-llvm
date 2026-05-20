@@ -63,6 +63,8 @@ void addIDToMetadataSetInPlace(Instruction &I, StringRef Key, Metadata *ID);
 
 uint32_t getMaxScopeID(const Function &F);
 
+bool hasID(const Instruction &I, Metadata *ID);
+
 } // namespace unsafe
 
 bool isSpeculationPrimitive(const Instruction &I);
