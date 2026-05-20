@@ -2604,6 +2604,20 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
   assert(CalledFunc && !CalledFunc->isDeclaration() &&
          "CanInlineCallSite should have verified direct call to definition");
 
+  // SoundSpec: if this is a `!safe` call to an `unsafe`-attr function (Case B
+  // below), prepare the call site BEFORE cloning. `prepareCallSiteToUnsafeFnForInlining`
+  // strips `unsafe.shadow.embed` wrappers off the call's args (so the cloned
+  // body uses the bare values), inserts a `unsafe.shadow.gen` before the call
+  // to dominate the soon-to-be-inlined unsafe region, rewires any
+  // `unsafe.shadow.arg` uses of the call result to the gen, and returns the
+  // fresh `!unsafe` MDNode to stamp on the inlined transmitters / spec
+  // primitives / relevant calls in Case B. Must run only when inlining is
+  // guaranteed to succeed — we're past CanInlineCallSite, so we're safe.
+  MDNode *PreparedUnsafeMD = nullptr;
+  if (CB.getMetadata(LLVMContext::MD_safe) &&
+      CalledFunc->hasFnAttribute(Attribute::Unsafe))
+    PreparedUnsafeMD = unsafe::prepareCallSiteToUnsafeFnForInlining(&CB);
+
   // Determine if we are dealing with a call in an EHPad which does not unwind
   // to caller.
   bool EHPadForCallUnwindsLocally = false;
@@ -2806,8 +2820,13 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
       //     surrounding scope. Once inlined, it executes under the caller's
       //     scope and needs an explicit tag to make that visible.
       auto needsScopeTag = [](const Instruction &I) {
+        // Use `unsafe::isRelevantCall` instead of plain `isa<CallBase>` so
+        // that SoundSpec shadow-token intrinsics (`shadow.gen`, `dep`,
+        // `arg`, `embed`, `xmit`) are excluded — they are themselves
+        // SoundSpec scaffolding and would be rejected by the verifier if
+        // we stamped `!unsafe` on them.
         return isSpeculationPrimitive(I) || isTransmitter(I) ||
-               isa<CallBase>(&I);
+               unsafe::isRelevantCall(I);
       };
 
       auto inlinedRange = [&]() {
@@ -2823,6 +2842,11 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
         for (BasicBlock &BB : inlinedRange())
           for (Instruction &I : BB)
             stripScopeTags(I);
+        // If the callee was NOT unsafe-attr, the cloned body brought in
+        // `llvm.unsafe.shadow.*` intrinsics that don't belong in an
+        // unsafe-attr function. Strip them.
+        if (!CalleeUnsafe)
+          unsafe::postProcessUnsafeFnAfterInlining(*Caller);
       } else if (CallUnsafeMD) {
         // Case A.
         for (BasicBlock &BB : inlinedRange())
@@ -2832,14 +2856,20 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
               I.setMetadata(LLVMContext::MD_unsafe, CallUnsafeMD);
           }
       } else if (CallSafeMD && CalleeUnsafe) {
-        // Case B.
-        auto Alloc = makeFreshIDAllocator();
-        MDNode *FreshMD = makeScopeMD(Alloc());
+        // Case B. The fresh scope MDNode and the dominating
+        // `unsafe.shadow.gen` were already allocated by
+        // `prepareCallSiteToUnsafeFnForInlining` (called pre-cloning, see
+        // top of `InlineFunctionImpl`). Use the pre-computed MD to stamp
+        // every transmitter / spec primitive / relevant call in the
+        // inlined range.
+        assert(PreparedUnsafeMD &&
+               "Case B reached without prepareCallSiteToUnsafeFnForInlining "
+               "running first");
         for (BasicBlock &BB : inlinedRange())
           for (Instruction &I : BB) {
             stripScopeTags(I);
             if (needsScopeTag(I))
-              I.setMetadata(LLVMContext::MD_unsafe, FreshMD);
+              I.setMetadata(LLVMContext::MD_unsafe, PreparedUnsafeMD);
           }
       } else if (CallSafeMD && !CalleeUnsafe) {
         // Case C. Map each unique callee scope ID to one fresh caller ID,
