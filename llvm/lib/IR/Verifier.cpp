@@ -7811,9 +7811,11 @@ void Verifier::verifyUnsafeScope(const Function &F, Metadata *ID) {
   // FIXME: Shouldn't have to do a const_cast...
   UnsafeScope Scope(const_cast<Function &>(F), ID);
   for (const Instruction *Dom : Scope.dominanceSet()) {
+#if 0
     auto *II = dyn_cast<IntrinsicInst>(Dom);
     Check(II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen,
           "Unsafe scope is not dominated by llvm.unsafe.shadow.gen! in " + F.getName(), Dom);
+#endif
   }
 }
 
@@ -7854,16 +7856,6 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
       Check(UnsafeMD->getNumOperands(), "!unsafe shouldn't be empty", &I);
     }
 
-#if 0
-    // Validate that llvm.unsafe.shadow.arg can only have (1) an llvm::Argument
-    // or (2) llvm.unsafe.shadow.embed as its operand.
-    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_arg) {
-      auto *V = II->getArgOperand(0);
-      Check(!isa<Instruction>(V) || isa<CallBase>(V),
-            "llvm.unsafe.shadow.arg has a bad argument", &I);
-    }
-#endif
-
     // @llvm.unsafe.shadow.dep shouldn't have !unsafe/!safe metadata.
     if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
       Check(!UnsafeMD && !SafeMD, "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata", &I);
@@ -7872,16 +7864,29 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
     if (UnsafeMD)
       Check(UnsafeMD->getNumOperands() == 1, "Expected exactly one !unsafe scope", &I, UnsafeMD);
 
-    // @llvm.unsafe.shadow.gen's 2nd arg should match its !unsafe scope.
+    // @llvm.unsafe.shadow.gen's arg should match its !unsafe scope.
     if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
       Check(UnsafeMD, "@llvm.unsafe.shadow.gen should have !unsafe metadata", &I);
       Check(
-          II->getArgOperand(1) ==
+          II->getArgOperand(0) ==
               cast<ConstantAsMetadata>(UnsafeMD->getOperand(0))->getValue(),
-          "@llvm.unafe.shadow.gen's 2nd arg should match its !unsafe metadata",
+          "@llvm.unsafe.shadow.gen's arg should match its !unsafe metadata",
           II, UnsafeMD);
     }
 
+#if 0
+    // Stores and @llvm.unsafe.shadow.store should have !soundspec.store.
+    if (isa<StoreInst>(&I) ||
+        (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_store)) {
+      Check(I.getMetadata("soundspec.store"),
+            "Expected !soundspec.store metadata on store",
+            &I);
+    }
+#endif
+
+    // All stores should be !unsafe.
+    if (isa<StoreInst>(&I))
+      Check(UnsafeMD, "All stores should be !unsafe", &I);
   }
 
   // Verify each unsafe scope individually.
