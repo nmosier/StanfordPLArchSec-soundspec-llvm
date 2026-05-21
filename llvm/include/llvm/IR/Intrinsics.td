@@ -215,6 +215,12 @@ def IntrConvergent : IntrinsicProperty;
 // This property indicates that the intrinsic is safe to speculate.
 def IntrSpeculatable : IntrinsicProperty;
 
+// IntrIdempotent - Calls to this intrinsic are idempotent: calling it N
+// times with identical arguments is equivalent to calling it once, even in
+// the presence of intervening operations. Parallels the idempotent
+// attribute on LLVM IR functions.
+def IntrIdempotent : IntrinsicProperty;
+
 // This property can be used to override the 'has no other side effects'
 // language of the IntrNoMem, IntrReadMem, IntrWriteMem, and IntrArgMemOnly
 // intrinsic properties.  By default, intrinsics are assumed to have side
@@ -1651,17 +1657,17 @@ def int_unsafe_close : Intrinsic<
 // natural data input (e.g. `alloca !unsafe`) something for
 // `llvm.unsafe.dep` to thread through.
 //
-// `i32 llvm.unsafe.shadow.gen(i32 %tok, i32 immarg %scope_id)`
-// materializes a fresh shadow token from an existing token plus a
-// distinct compile-time scope id. The immediate second operand makes
-// two `shadow.gen` calls in different scopes structurally distinct, so
-// transformations like SimplifyCFG's hoist-common-instructions don't
-// merge them. Has side effects via `IntrInaccessibleMemOnly` (survives
-// DCE; not CSE'd). NOT speculatable.
+// `i32 llvm.unsafe.shadow.gen(i32 immarg %scope_id)` materializes a
+// fresh shadow token tagged with a distinct compile-time scope id.
+// `IntrInaccessibleMemOnly` + `IntrSpeculatable` + `IntrIdempotent`:
+// the call's effect is monotonic and keyed solely on the scope id, so
+// two gens with the same id are CSE-equivalent and can be hoisted /
+// duplicated freely.
 def int_unsafe_shadow_gen : DefaultAttrsIntrinsic<
     [llvm_i32_ty],
-    [llvm_i32_ty, llvm_i32_ty],
-    [IntrInaccessibleMemOnly, ImmArg<ArgIndex<1>>]>;
+    [llvm_i32_ty],
+    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent,
+     ImmArg<ArgIndex<0>>]>;
 
 // `i32 llvm.unsafe.shadow.dep(i32 %x, i32 %y)` combines two shadow
 // tokens into a single token. Pure (CSE-equivalent for equal operand
@@ -1704,6 +1710,27 @@ def int_unsafe_shadow_xmit : DefaultAttrsIntrinsic<
     [],
     [llvm_i32_ty],
     [IntrInaccessibleMemOnly]>;
+
+// `void llvm.unsafe.shadow.store(i32 %shadowaddr, i32 %shadowdata)`
+// is a side-effecting shadow-memory store. Like `shadow.xmit`,
+// `IntrInaccessibleMemOnly` gives it the minimum side effects needed
+// to survive DCE without forcing a full memory barrier (ordinary
+// loads/stores may still be reordered around it). NOT speculatable.
+def int_unsafe_shadow_store : DefaultAttrsIntrinsic<
+    [],
+    [llvm_i32_ty, llvm_i32_ty],
+    [IntrInaccessibleMemOnly]>;
+
+// `void llvm.unsafe.shadow.tie(i32 %gentok, i32 %deptok)` ties a
+// shadow gen token to a dep token. `IntrInaccessibleMemOnly` +
+// `IntrSpeculatable` + `IntrIdempotent`: the call's effect is a
+// monotonic latched-bit set keyed on the operand pair, so two ties
+// with identical operands are CSE-equivalent and can be hoisted /
+// duplicated freely.
+def int_unsafe_shadow_tie : DefaultAttrsIntrinsic<
+    [],
+    [llvm_i32_ty, llvm_i32_ty],
+    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
 
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //
