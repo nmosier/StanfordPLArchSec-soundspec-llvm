@@ -1484,10 +1484,9 @@ def UNSAFE_CLOSE : StandardPseudoInstruction {
 // three means AsmPrinter emits no bytes for them.
 def UNSAFE_SHADOW_GEN : StandardPseudoInstruction {
   let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$tok, i32imm:$scope);
+  let InOperandList = (ins i32imm:$scope);
   let AsmString = "";
   let hasSideEffects = true;
-  let Constraints = "$tok = $dst";
   let isMeta = true;
 }
 def UNSAFE_SHADOW_DEP : StandardPseudoInstruction {
@@ -1524,6 +1523,25 @@ def UNSAFE_SHADOW_EMBED : StandardPseudoInstruction {
   let AsmString = "";
   let hasSideEffects = false;
   let Constraints = "$val = $dst";
+  let isMeta = true;
+}
+// Side-effecting shadow-memory store. Two i32 register inputs (address
+// and data), no def, stripped at AsmPrinter like the other shadow.*
+// meta pseudos.
+def UNSAFE_SHADOW_STORE : StandardPseudoInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$shadowaddr, unknown:$shadowdata);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let isMeta = true;
+}
+// Idempotent tie of gen and dep tokens. Two i32 register inputs, no def,
+// stripped at AsmPrinter like the other shadow.* meta pseudos.
+def UNSAFE_SHADOW_TIE : StandardPseudoInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$gentok, unknown:$deptok);
+  let AsmString = "";
+  let hasSideEffects = true;
   let isMeta = true;
 }
 
