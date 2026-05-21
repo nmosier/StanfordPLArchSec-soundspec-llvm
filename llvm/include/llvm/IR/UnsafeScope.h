@@ -115,7 +115,7 @@ public:
   // Get the values consumed by each instruction in the dominance set.
   DenseMap<Instruction *, SmallSet<Value *, 4>> computeConsumptionFrontier();
 
-  void print(raw_ostream &os);
+  void print(raw_ostream &OS);
   void dump();
 };
 
