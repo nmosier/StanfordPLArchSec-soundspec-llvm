@@ -304,6 +304,13 @@ def StackAlignment : IntAttr<"alignstack", IntersectPreserve, [FnAttr, ParamAttr
 /// Function can be speculated.
 def Speculatable : EnumAttr<"speculatable", IntersectAnd, [FnAttr]>;
 
+/// Function is idempotent: calling it N times with identical arguments has
+/// the same observable effect as calling it once, regardless of intervening
+/// operations. Modeled on monotonic latched effects (e.g. "set this bit"):
+/// the effect is stable and re-applying it is a no-op. Permits aggressive
+/// elimination of redundant calls even when the call is side-effecting.
+def Idempotent : EnumAttr<"idempotent", IntersectAnd, [FnAttr]>;
+
 /// Stack protection.
 def StackProtect : EnumAttr<"ssp", IntersectPreserve, [FnAttr]>;
 
