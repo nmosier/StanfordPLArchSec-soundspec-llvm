@@ -114,8 +114,12 @@ public:
 
   // Get the values consumed by each instruction in the dominance set.
   DenseMap<Instruction *, SmallSet<Value *, 4>> computeConsumptionFrontier();
+
+  void print(raw_ostream &os);
+  void dump();
 };
 
+// TODO: Might be able to remove.
 void replaceUnsafeScopeWith(Function &F, MDNode *OldID, MDNode *NewID);
 
 } // namespace llvm
