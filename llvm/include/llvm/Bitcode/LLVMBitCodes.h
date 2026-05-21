@@ -809,6 +809,7 @@ enum AttributeKindCodes {
   ATTR_KIND_UNSAFE = 106,
   ATTR_KIND_SOUNDSPEC_CFI = 107,
   ATTR_KIND_SOUNDSPEC_ARG_UNSAFE = 108,
+  ATTR_KIND_IDEMPOTENT = 109,
 };
 
 enum ComdatSelectionKindCodes {
