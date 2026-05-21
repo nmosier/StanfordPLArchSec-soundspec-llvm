@@ -416,6 +416,8 @@ void CodeGenIntrinsic::setProperty(const Record *R) {
     isCold = true;
   else if (R->getName() == "IntrSpeculatable")
     isSpeculatable = true;
+  else if (R->getName() == "IntrIdempotent")
+    isIdempotent = true;
   else if (R->getName() == "IntrHasSideEffects")
     hasSideEffects = true;
   else if (R->getName() == "IntrStrictFP")

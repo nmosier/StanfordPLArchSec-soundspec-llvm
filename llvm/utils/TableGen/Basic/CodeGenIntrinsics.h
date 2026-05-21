@@ -111,6 +111,9 @@ struct CodeGenIntrinsic {
   // True if the intrinsic is marked as speculatable.
   bool isSpeculatable = false;
 
+  // True if the intrinsic is marked as idempotent.
+  bool isIdempotent = false;
+
   // True if the intrinsic is marked as strictfp.
   bool isStrictFP = false;
 
