@@ -1463,8 +1463,8 @@ enum NodeType {
   /// `i32 llvm.unsafe.shadow.dep(i32, i32)`, and
   /// `void llvm.unsafe.shadow.xmit(i32)`.
   /// UNSAFE_SHADOW_GEN: chain-carrying side-effecting token producer.
-  /// Operand 0 is the chain, operand 1 is the i32 input token, operand 2
-  /// is a TargetConstant i32 scope id; results are {i32 token, chain}.
+  /// Operand 0 is the chain, operand 1 is a TargetConstant i32 scope id;
+  /// results are {i32 token, chain}.
   /// UNSAFE_SHADOW_DEP: operands 0/1 are the two i32 tokens; single i32
   /// result.
   /// UNSAFE_SHADOW_XMIT: operand 0 is the chain, operand 1 is the i32
@@ -1474,11 +1474,20 @@ enum NodeType {
   /// UNSAFE_SHADOW_EMBED: operand 0 is the arbitrary-typed value, operand
   /// 1 is the i32 shadow token; single result matches operand 0's type.
   /// Identity passthrough on operand 0.
+  /// UNSAFE_SHADOW_STORE: side-effecting shadow-memory store. Operand 0
+  /// is the chain, operand 1 is the i32 shadow address, operand 2 is
+  /// the i32 shadow data; single chain result.
+  /// UNSAFE_SHADOW_TIE: idempotent side-effecting tie of a shadow gen
+  /// token to a shadow dep token. Operand 0 is the chain, operand 1 is
+  /// the i32 gen token, operand 2 is the i32 dep token; single chain
+  /// result.
   UNSAFE_SHADOW_GEN,
   UNSAFE_SHADOW_DEP,
   UNSAFE_SHADOW_XMIT,
   UNSAFE_SHADOW_ARG,
   UNSAFE_SHADOW_EMBED,
+  UNSAFE_SHADOW_STORE,
+  UNSAFE_SHADOW_TIE,
 
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for
