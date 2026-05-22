@@ -1686,26 +1686,16 @@ bool InstCombinerImpl::mergeStoreIntoSuccessor(StoreInst &SI) {
   if (AATags)
     NewSI->setAAMetadata(AATags.merge(OtherStore->getAAMetadata()));
 
-  // [soundspec] The merged store stands in for both originals. For
-  // `!unsafe` we cannot just union the operand sets (that would create
-  // a store claiming membership in two scopes, only one of which has a
-  // dominating `shadow.gen` on each incoming path — verifier rejects).
-  // Instead, when both sides carry single-scope `!unsafe` MDs, rename
-  // one scope to the other across the whole function via
-  // `replaceUnsafeScopeWith`. After the rename both predecessor paths'
-  // gens (and any other tagged instructions) carry the unified scope,
-  // and the merged store can carry that single scope tag.
-  MDNode *SIUnsafe = SI.getMetadata(LLVMContext::MD_unsafe);
-  MDNode *OSUnsafe = OtherStore->getMetadata(LLVMContext::MD_unsafe);
-  if (SIUnsafe || OSUnsafe) {
-    if (SIUnsafe && OSUnsafe)
-      replaceUnsafeScopeWith(*SI.getFunction(), OSUnsafe, SIUnsafe);
-    NewSI->setMetadata(LLVMContext::MD_unsafe,
-                       SIUnsafe ? SIUnsafe : OSUnsafe);
-  } else if (MDNode *SISafe = SI.getMetadata(LLVMContext::MD_safe)) {
+  // [soundspec] The merged store stands in for both originals. Just
+  // union the scope sets — the verifier no longer requires a single
+  // dominating gen per scope.
+  if (MDNode *Merged = unsafe::mergeMetadata(
+          SI.getMetadata(LLVMContext::MD_unsafe),
+          OtherStore->getMetadata(LLVMContext::MD_unsafe)))
+    NewSI->setMetadata(LLVMContext::MD_unsafe, Merged);
+  else if (MDNode *SISafe = SI.getMetadata(LLVMContext::MD_safe))
     if (OtherStore->getMetadata(LLVMContext::MD_safe))
       NewSI->setMetadata(LLVMContext::MD_safe, SISafe);
-  }
 
   // Nuke the old stores.
   eraseInstFromFunction(SI);

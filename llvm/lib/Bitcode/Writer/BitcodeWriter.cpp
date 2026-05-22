@@ -964,6 +964,8 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_SOUNDSPEC_CFI;
   case Attribute::SoundSpecArgUnsafe:
     return bitc::ATTR_KIND_SOUNDSPEC_ARG_UNSAFE;
+  case Attribute::Idempotent:
+    return bitc::ATTR_KIND_IDEMPOTENT;
   case Attribute::EndAttrKinds:
     llvm_unreachable("Can not encode end-attribute kinds marker.");
   case Attribute::None:

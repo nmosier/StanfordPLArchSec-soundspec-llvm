@@ -7808,93 +7808,111 @@ void Verifier::verifyUnsafeFunction(const Function &F) {
 
 
 void Verifier::verifyUnsafeScope(const Function &F, Metadata *ID) {
-  // FIXME: Shouldn't have to do a const_cast...
-  UnsafeScope Scope(const_cast<Function &>(F), ID);
-  for (const Instruction *Dom : Scope.dominanceSet()) {
-#if 0
-    auto *II = dyn_cast<IntrinsicInst>(Dom);
-    Check(II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen,
-          "Unsafe scope is not dominated by llvm.unsafe.shadow.gen! in " + F.getName(), Dom);
-#endif
-  }
 }
 
 void Verifier::verifyUnsafeScopes(const Function &F) {
-  if (!SoundSpecVerify || !F.getMetadata("soundspec.verify"))
+  using namespace llvm::PatternMatch;
+
+  // Make sure !unsafe metadata has the right shape.
+  // We verify this even if !soundspec.verify isn't present.
+  for (auto &I : instructions(F)) {
+    auto *IDs = I.getMetadata(LLVMContext::MD_unsafe);
+    if (!IDs)
+      continue;
+    for (Metadata *ID : IDs->operands())
+      Check(unsafe::isValidScope(ID),
+            "bad unsafe scope metadata node in list", &I, ID);
+  }
+
+  if (!SoundSpecVerify || !F.getMetadata("soundspec.verify")) {
+    // Shouldn't have any intrinsics.
+    for (auto &I : instructions(F)) {
+      if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+        switch (II->getIntrinsicID()) {
+        case Intrinsic::unsafe_shadow_gen:
+          case Intrinsic::unsafe_shadow_dep:
+          case Intrinsic::unsafe_shadow_arg:
+          case Intrinsic::unsafe_shadow_embed:
+            Check(false,
+                  "Found shadow intrinsic in early-stage soundspec function",
+                  &I);
+            break;
+        }
+      }
+    }
     return;
+  }
 
   if (F.hasFnAttribute(Attribute::Unsafe)) {
     verifyUnsafeFunction(F);
     return;
   }
 
+  // Collect reachable blocks. We'll only verify those.
+  SmallSet<const BasicBlock *, 8> ReachableBlocks;
+  ReachableBlocks.reserve(F.size());
+  {
+    SmallVector<const BasicBlock *> Todo;
+    Todo.push_back(&F.getEntryBlock());
+    while (!Todo.empty()) {
+      auto *B = Todo.pop_back_val();
+      if (ReachableBlocks.insert(B).second)
+        copy(successors(B), std::inserter(ReachableBlocks, ReachableBlocks.end()));
+    }
+  }
+
   // Collect !unsafe IDs.
   SmallSet<Metadata *, 4> IDSet;
-  for (auto &I : instructions(F))
-    if (auto *IDs = I.getMetadata(LLVMContext::MD_unsafe))
-      copy(IDs->operands(), std::inserter(IDSet, IDSet.end()));
+  for (auto *B : ReachableBlocks)
+    for (auto &I : *B)
+      if (auto *IDs = I.getMetadata(LLVMContext::MD_unsafe))
+        copy(IDs->operands(), std::inserter(IDSet, IDSet.end()));
 
   // Make sure that we don't have any bare transmitters,
   // speculation primitives, or calls.
-  for (auto &I : instructions(F)) {
-    auto *UnsafeMD = I.getMetadata(LLVMContext::MD_unsafe);
-    auto *SafeMD = I.getMetadata(LLVMContext::MD_safe);
-    auto *II = dyn_cast<IntrinsicInst>(&I);
+  for (auto *B : ReachableBlocks) {
+    for (auto &I : *B) {
+      auto *UnsafeMD = I.getMetadata(LLVMContext::MD_unsafe);
+      auto *SafeMD = I.getMetadata(LLVMContext::MD_safe);
+      auto *II = dyn_cast<IntrinsicInst>(&I);
 
-    if (isSpeculationPrimitive(I)) {
-      Check(UnsafeMD || SafeMD,
-            "speculation primitive missing !safe/!unsafe metadata!", &I);
+      if (isSpeculationPrimitive(I)) {
+        Check(UnsafeMD || SafeMD,
+              "speculation primitive missing !safe/!unsafe metadata!", &I);
+      }
+
+      if (isTransmitter(I) || unsafe::isRelevantCall(I)) {
+        Check(UnsafeMD || SafeMD,
+              "transmitter/call missing !safe/!unsafe metadata!", &I);
+      }
+
+      // Make sure there is no empty !unsafe.
+      if (UnsafeMD) {
+        Check(UnsafeMD->getNumOperands(), "!unsafe shouldn't be empty", &I);
+      }
+
+      // @llvm.unsafe.shadow.dep shouldn't have !unsafe/!safe metadata.
+      if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
+        Check(!UnsafeMD && !SafeMD,
+              "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata",
+              &I);
+      }
+
+      // @llvm.unsafe.shadow.gen's metadata arg should match its !unsafe scope.
+      if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
+        Check(UnsafeMD, "@llvm.unsafe.shadow.gen should have !unsafe metadata",
+              &I);
+        auto *MV = cast<MetadataAsValue>(II->getArgOperand(0));
+        Check(MV->getMetadata() == UnsafeMD->getOperand(0),
+              "@llvm.unsafe.shadow.gen's metadata arg should match its !unsafe metadata",
+              II, UnsafeMD);
+      }
     }
-
-    if (isTransmitter(I) || unsafe::isRelevantCall(I)) {
-      Check(UnsafeMD || SafeMD,
-            "transmitter/call missing !safe/!unsafe metadata!", &I);
-    }
-
-    // Make sure there is no empty !unsafe.
-    if (UnsafeMD) {
-      Check(UnsafeMD->getNumOperands(), "!unsafe shouldn't be empty", &I);
-    }
-
-    // @llvm.unsafe.shadow.dep shouldn't have !unsafe/!safe metadata.
-    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
-      Check(!UnsafeMD && !SafeMD, "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata", &I);
-    }
-
-    if (UnsafeMD)
-      Check(UnsafeMD->getNumOperands() == 1, "Expected exactly one !unsafe scope", &I, UnsafeMD);
-
-    // @llvm.unsafe.shadow.gen's arg should match its !unsafe scope.
-    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
-      Check(UnsafeMD, "@llvm.unsafe.shadow.gen should have !unsafe metadata", &I);
-      Check(
-          II->getArgOperand(0) ==
-              cast<ConstantAsMetadata>(UnsafeMD->getOperand(0))->getValue(),
-          "@llvm.unsafe.shadow.gen's arg should match its !unsafe metadata",
-          II, UnsafeMD);
-    }
-
-#if 0
-    // Stores and @llvm.unsafe.shadow.store should have !soundspec.store.
-    if (isa<StoreInst>(&I) ||
-        (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_store)) {
-      Check(I.getMetadata("soundspec.store"),
-            "Expected !soundspec.store metadata on store",
-            &I);
-    }
-#endif
-
-    // All stores should be !unsafe.
-    if (isa<StoreInst>(&I))
-      Check(UnsafeMD, "All stores should be !unsafe", &I);
   }
 
   // Verify each unsafe scope individually.
-#warning "[soundspec] Re-enable this check!"
-#if 1
   for (auto *ID : IDSet)
     verifyUnsafeScope(F, ID);
-#endif
 }
 
 //===----------------------------------------------------------------------===//

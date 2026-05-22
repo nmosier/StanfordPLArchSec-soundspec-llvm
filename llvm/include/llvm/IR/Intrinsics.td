@@ -1657,17 +1657,18 @@ def int_unsafe_close : Intrinsic<
 // natural data input (e.g. `alloca !unsafe`) something for
 // `llvm.unsafe.dep` to thread through.
 //
-// `i32 llvm.unsafe.shadow.gen(i32 immarg %scope_id)` materializes a
-// fresh shadow token tagged with a distinct compile-time scope id.
-// `IntrInaccessibleMemOnly` + `IntrSpeculatable` + `IntrIdempotent`:
-// the call's effect is monotonic and keyed solely on the scope id, so
-// two gens with the same id are CSE-equivalent and can be hoisted /
-// duplicated freely.
+// `i32 llvm.unsafe.shadow.gen(metadata %scope)` materializes a fresh
+// shadow token tagged with a distinct scope-identity MDNode. The MDNode
+// is typically a self-referencing distinct node (`!x = distinct !{!x}`)
+// so its identity is its pointer; cloning a function gives each clone
+// its own scope. `IntrInaccessibleMemOnly` + `IntrSpeculatable` +
+// `IntrIdempotent`: the call's effect is monotonic and keyed solely on
+// the scope MDNode, so two gens with the same MDNode are CSE-equivalent
+// and can be hoisted / duplicated freely.
 def int_unsafe_shadow_gen : DefaultAttrsIntrinsic<
     [llvm_i32_ty],
-    [llvm_i32_ty],
-    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent,
-     ImmArg<ArgIndex<0>>]>;
+    [llvm_metadata_ty],
+    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
 
 // `i32 llvm.unsafe.shadow.dep(i32 %x, i32 %y)` combines two shadow
 // tokens into a single token. Pure (CSE-equivalent for equal operand

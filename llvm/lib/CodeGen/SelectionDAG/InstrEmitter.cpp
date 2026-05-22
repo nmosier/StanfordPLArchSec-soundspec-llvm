@@ -464,6 +464,10 @@ void InstrEmitter::AddOperand(MachineInstrBuilder &MIB, SDValue Op,
                         BA->getTargetFlags());
   } else if (TargetIndexSDNode *TI = dyn_cast<TargetIndexSDNode>(Op)) {
     MIB.addTargetIndex(TI->getIndex(), TI->getOffset(), TI->getTargetFlags());
+  } else if (MDNodeSDNode *MDN = dyn_cast<MDNodeSDNode>(Op)) {
+    // Metadata operand carried through to MIR (e.g. SoundSpec
+    // intrinsics that take a scope-identity MDNode).
+    MIB.addMetadata(MDN->getMD());
   } else {
     assert(Op.getValueType() != MVT::Other &&
            Op.getValueType() != MVT::Glue &&

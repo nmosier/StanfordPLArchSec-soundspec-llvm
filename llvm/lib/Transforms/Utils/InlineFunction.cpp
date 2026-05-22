@@ -1110,6 +1110,32 @@ void ScopedAliasMetadataDeepCloner::remap(Function::iterator FStart,
   }
 }
 
+namespace {
+/// Clones distinct `soundspec.store` MDNodes across an inlining boundary so
+/// each inlined store instance has its own identity. Two inlined copies of
+/// the same callee store thus carry different MDNodes, and a caller-side
+/// store sharing identity with a callee store gets a fresh MD in the inlined
+/// copy. Walks the inlined range and clones lazily, deduping so that all
+/// occurrences of the same source MDNode map to the same fresh clone.
+class SoundSpecStoreMetadataDeepCloner {
+  DenseMap<MDNode *, MDNode *> MDMap;
+
+public:
+  void remap(Function::iterator FStart, Function::iterator FEnd) {
+    for (BasicBlock &BB : make_range(FStart, FEnd))
+      for (Instruction &I : BB)
+        if (MDNode *MD = I.getMetadata(LLVMContext::MD_soundspec_store)) {
+          if (!MD->isDistinct())
+            continue;
+          auto [It, Inserted] = MDMap.try_emplace(MD, nullptr);
+          if (Inserted)
+            It->second = MDNode::getDistinct(MD->getContext(), {});
+          I.setMetadata(LLVMContext::MD_soundspec_store, It->second);
+        }
+  }
+};
+} // namespace
+
 /// If the inlined function has noalias arguments,
 /// then add new alias scopes for each noalias argument, tag the mapped noalias
 /// parameters with noalias metadata specifying the new scope, and tag all
@@ -2604,19 +2630,12 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
   assert(CalledFunc && !CalledFunc->isDeclaration() &&
          "CanInlineCallSite should have verified direct call to definition");
 
-  // SoundSpec: if this is a `!safe` call to an `unsafe`-attr function (Case B
-  // below), prepare the call site BEFORE cloning. `prepareCallSiteToUnsafeFnForInlining`
-  // strips `unsafe.shadow.embed` wrappers off the call's args (so the cloned
-  // body uses the bare values), inserts a `unsafe.shadow.gen` before the call
-  // to dominate the soon-to-be-inlined unsafe region, rewires any
-  // `unsafe.shadow.arg` uses of the call result to the gen, and returns the
-  // fresh `!unsafe` MDNode to stamp on the inlined transmitters / spec
-  // primitives / relevant calls in Case B. Must run only when inlining is
-  // guaranteed to succeed — we're past CanInlineCallSite, so we're safe.
-  MDNode *PreparedUnsafeMD = nullptr;
-  if (CB.getMetadata(LLVMContext::MD_safe) &&
-      CalledFunc->hasFnAttribute(Attribute::Unsafe))
-    PreparedUnsafeMD = unsafe::prepareCallSiteToUnsafeFnForInlining(&CB);
+  // SoundSpec: prepare the call site BEFORE cloning. Returns a cookie
+  // consumed by `postProcessInlinedBlocks` after cloning. Must run only
+  // when inlining is guaranteed to succeed — past CanInlineCallSite, so
+  // we're safe.
+  unsafe::InliningCookie SoundSpecCookie =
+      unsafe::prepareCallSiteForInlining(CB);
 
   // Determine if we are dealing with a call in an EHPad which does not unwind
   // to caller.
@@ -2736,178 +2755,10 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
     FirstNewBlock = LastBlock; ++FirstNewBlock;
 
     // SoundSpec: translate per-instruction scope tags across the inline
-    // boundary. The dispatch is on the (call-site MD, callee `unsafe` attr)
-    // pair. Three cases are non-trivial; everything else is a no-op.
-    //
-    //   A. Call site has `!unsafe`. The caller's scope subsumes everything
-    //      inlined: clear `!safe`/`!unsafe` on every inlined instruction,
-    //      then re-tag speculation primitives and transmitters with the
-    //      caller's `!unsafe` MDNode.
-    //
-    //   B. Call site has `!safe` and the callee is `unsafe`-attr. Allocate
-    //      a fresh scope ID (caller-local: `max(existing)+1`), clear
-    //      `!safe`/`!unsafe` on every inlined instruction, then tag
-    //      speculation primitives and transmitters with the new MDNode.
-    //
-    //   C. Call site has `!safe` and the callee is not `unsafe`-attr. The
-    //      callee's existing `!unsafe` scope IDs must be renumbered into
-    //      the caller's namespace to avoid collision. Each unique scope
-    //      ID appearing in the inlined range is mapped to a fresh caller-
-    //      local ID; every `!unsafe` MDNode in the range is rebuilt.
-    //
-    // `llvm.unsafe.{enter,exit,in,out}` intrinsics inside the callee are
-    // intentionally left untouched in all cases.
-    {
-      LLVMContext &Ctx = Caller->getContext();
-      MDNode *CallUnsafeMD = CB.getMetadata(LLVMContext::MD_unsafe);
-      MDNode *CallSafeMD = CB.getMetadata(LLVMContext::MD_safe);
-      bool CalleeUnsafe = CalledFunc->hasFnAttribute(Attribute::Unsafe);
-      bool CallerUnsafe = Caller->hasFnAttribute(Attribute::Unsafe);
-
-      auto stripScopeTags = [](Instruction &I) {
-        I.setMetadata(LLVMContext::MD_unsafe, nullptr);
-        I.setMetadata(LLVMContext::MD_safe, nullptr);
-      };
-
-      // Walks the *post-inline* caller body (which contains the just-cloned
-      // callee) and returns a stateful allocator that yields fresh scope
-      // IDs strictly greater than every ID already present. Increasing
-      // values are produced on each call so a sequence of fresh IDs is
-      // mutually distinct.
-      auto makeFreshIDAllocator = [&]() {
-        uint64_t Max = 0;
-        auto bump = [&Max](uint64_t ID) { if (ID > Max) Max = ID; };
-        for (BasicBlock &BB : *Caller) {
-          for (Instruction &I : BB) {
-            if (MDNode *MD = I.getMetadata(LLVMContext::MD_unsafe))
-              for (Metadata *Op : MD->operands())
-                if (auto *CAM = dyn_cast_or_null<ConstantAsMetadata>(Op))
-                  if (auto *CI = dyn_cast_or_null<ConstantInt>(CAM->getValue()))
-                    bump(CI->getZExtValue());
-            if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
-              switch (II->getIntrinsicID()) {
-              case Intrinsic::unsafe_enter:
-              case Intrinsic::unsafe_exit:
-                if (auto *CI = dyn_cast<ConstantInt>(II->getArgOperand(0)))
-                  bump(CI->getZExtValue());
-                break;
-              case Intrinsic::unsafe_in:
-              case Intrinsic::unsafe_out:
-                if (auto *CI = dyn_cast<ConstantInt>(II->getArgOperand(1)))
-                  bump(CI->getZExtValue());
-                break;
-              default:
-                break;
-              }
-            }
-          }
-        }
-        return [Max]() mutable -> uint64_t { return ++Max; };
-      };
-
-      auto makeScopeMD = [&Ctx](uint64_t ID) -> MDNode * {
-        return MDNode::get(Ctx, {ConstantAsMetadata::get(
-            ConstantInt::get(Type::getInt32Ty(Ctx), ID))});
-      };
-
-      // In Cases A and B the caller's scope absorbs the inlined body. Every
-      // instruction that participates in the speculation model gets re-tagged
-      // with the caller-side scope MDNode. That includes:
-      //   - speculation primitives,
-      //   - transmitters,
-      //   - every CallBase (direct calls too): a direct call inside the
-      //     callee was implicitly governed by the callee's own attribute /
-      //     surrounding scope. Once inlined, it executes under the caller's
-      //     scope and needs an explicit tag to make that visible.
-      auto needsScopeTag = [](const Instruction &I) {
-        // Use `unsafe::isRelevantCall` instead of plain `isa<CallBase>` so
-        // that SoundSpec shadow-token intrinsics (`shadow.gen`, `dep`,
-        // `arg`, `embed`, `xmit`) are excluded — they are themselves
-        // SoundSpec scaffolding and would be rejected by the verifier if
-        // we stamped `!unsafe` on them.
-        return isSpeculationPrimitive(I) || isTransmitter(I) ||
-               unsafe::isRelevantCall(I);
-      };
-
-      auto inlinedRange = [&]() {
-        return llvm::make_range(FirstNewBlock, Caller->end());
-      };
-
-      if (CallerUnsafe) {
-        // Caller is `unsafe`-attr: the function attribute already covers
-        // every instruction in it, so per-instruction !safe/!unsafe tags
-        // would be redundant. The verifier rejects !unsafe MD on any
-        // instruction inside an unsafe function (and !safe is meaningless
-        // there too). Strip both kinds from the inlined range.
-        for (BasicBlock &BB : inlinedRange())
-          for (Instruction &I : BB)
-            stripScopeTags(I);
-        // If the callee was NOT unsafe-attr, the cloned body brought in
-        // `llvm.unsafe.shadow.*` intrinsics that don't belong in an
-        // unsafe-attr function. Strip them.
-        if (!CalleeUnsafe)
-          unsafe::postProcessUnsafeFnAfterInlining(*Caller);
-      } else if (CallUnsafeMD) {
-        // Case A.
-        for (BasicBlock &BB : inlinedRange())
-          for (Instruction &I : BB) {
-            stripScopeTags(I);
-            if (needsScopeTag(I))
-              unsafe::setUnsafeScope(I, CallUnsafeMD);
-          }
-      } else if (CallSafeMD && CalleeUnsafe) {
-        // Case B. The fresh scope MDNode and the dominating
-        // `unsafe.shadow.gen` were already allocated by
-        // `prepareCallSiteToUnsafeFnForInlining` (called pre-cloning, see
-        // top of `InlineFunctionImpl`). Use the pre-computed MD to stamp
-        // every transmitter / spec primitive / relevant call in the
-        // inlined range.
-        assert(PreparedUnsafeMD &&
-               "Case B reached without prepareCallSiteToUnsafeFnForInlining "
-               "running first");
-        for (BasicBlock &BB : inlinedRange())
-          for (Instruction &I : BB) {
-            stripScopeTags(I);
-            if (needsScopeTag(I))
-              unsafe::setUnsafeScope(I, PreparedUnsafeMD);
-          }
-      } else if (CallSafeMD && !CalleeUnsafe) {
-        // Case C. Map each unique callee scope ID to one fresh caller ID,
-        // then rebuild every !unsafe MDNode in the inlined range.
-        auto Alloc = makeFreshIDAllocator();
-        DenseMap<uint64_t, uint64_t> IDMap;
-        auto mapID = [&](uint64_t Old) -> uint64_t {
-          auto It = IDMap.find(Old);
-          if (It != IDMap.end())
-            return It->second;
-          uint64_t New = Alloc();
-          IDMap.try_emplace(Old, New);
-          return New;
-        };
-        IntegerType *I32 = Type::getInt32Ty(Ctx);
-        auto remap = [&](MDNode *MD) -> MDNode * {
-          SmallVector<Metadata *, 4> NewOps;
-          NewOps.reserve(MD->getNumOperands());
-          for (Metadata *Op : MD->operands()) {
-            auto *CAM = dyn_cast_or_null<ConstantAsMetadata>(Op);
-            auto *CI = CAM ? dyn_cast_or_null<ConstantInt>(CAM->getValue())
-                           : nullptr;
-            if (!CI) {
-              NewOps.push_back(Op);
-              continue;
-            }
-            NewOps.push_back(ConstantAsMetadata::get(
-                ConstantInt::get(I32, mapID(CI->getZExtValue()))));
-          }
-          return MDNode::get(Ctx, NewOps);
-        };
-        for (BasicBlock &BB : inlinedRange())
-          for (Instruction &I : BB)
-            if (MDNode *MD = I.getMetadata(LLVMContext::MD_unsafe))
-              unsafe::setUnsafeScope(I, remap(MD));
-      }
-      // All other (call-site MD, callee attr) combinations: no-op.
-    }
+    // boundary. All cases (caller-unsafe-attr, !unsafe call, !safe call)
+    // handled by `postProcessInlinedBlocks` using the pre-clone cookie.
+    unsafe::postProcessInlinedBlocks(
+        llvm::make_range(FirstNewBlock, Caller->end()), SoundSpecCookie);
 
     // Insert retainRV/clainRV runtime calls.
     objcarc::ARCInstKind RVCallKind = objcarc::getAttachedARCFunctionKind(&CB);
@@ -3001,6 +2852,11 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
     // Now clone the inlined noalias scope metadata.
     SAMetadataCloner.clone();
     SAMetadataCloner.remap(FirstNewBlock, Caller->end());
+
+    // Give every inlined `soundspec.store` MDNode a fresh distinct identity so
+    // two inlined copies of the same callee store don't share identity, and so
+    // callee stores don't collide with caller stores.
+    SoundSpecStoreMetadataDeepCloner().remap(FirstNewBlock, Caller->end());
 
     // Add noalias metadata if necessary.
     AddAliasScopeMetadata(CB, VMap, DL, CalleeAAR, InlinedFunctionInfo);

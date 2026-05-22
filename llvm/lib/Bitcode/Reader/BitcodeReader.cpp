@@ -2274,6 +2274,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::SoundSpecCfi;
   case bitc::ATTR_KIND_SOUNDSPEC_ARG_UNSAFE:
     return Attribute::SoundSpecArgUnsafe;
+  case bitc::ATTR_KIND_IDEMPOTENT:
+    return Attribute::Idempotent;
   }
 }
 

@@ -7116,16 +7116,15 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   case Intrinsic::unsafe_shadow_gen: {
     // SoundSpec shadow-token producer. Chain-carrying so it can't be
     // CSE'd or DCE'd. Results are {i32 token, chain}; SDNode operands
-    // are {chain, i32 tok, TargetConstant i32 scope_id}. The scope id
-    // arg is an ImmArg, materialized as a TargetConstant so it stays as
-    // an immediate operand on the MachineInstr.
-    SDValue Tok = getValue(I.getArgOperand(0));
-    auto *Scope = cast<ConstantInt>(I.getArgOperand(1));
-    SDValue ScopeOp =
-        DAG.getTargetConstant(Scope->getZExtValue(), sdl, MVT::i32);
+    // are {chain, MDNode scope}. The scope arg is a `metadata` operand
+    // at the IR level, materialized as an MDNodeSDNode that carries
+    // through to MIR as a `MO_Metadata` MachineOperand.
+    auto *MV = cast<MetadataAsValue>(I.getArgOperand(0));
+    auto *Scope = cast<MDNode>(MV->getMetadata());
+    SDValue ScopeOp = DAG.getMDNode(Scope);
     SDVTList VTs = DAG.getVTList(MVT::i32, MVT::Other);
     SDValue Node =
-        DAG.getNode(ISD::UNSAFE_SHADOW_GEN, sdl, VTs, getRoot(), Tok, ScopeOp);
+        DAG.getNode(ISD::UNSAFE_SHADOW_GEN, sdl, VTs, getRoot(), ScopeOp);
     setValue(&I, Node.getValue(0));
     DAG.setRoot(Node.getValue(1));
     return;
@@ -7143,6 +7142,26 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     SDValue X = getValue(I.getArgOperand(0));
     SDValue Node =
         DAG.getNode(ISD::UNSAFE_SHADOW_XMIT, sdl, MVT::Other, getRoot(), X);
+    DAG.setRoot(Node);
+    return;
+  }
+  case Intrinsic::unsafe_shadow_store: {
+    // SoundSpec side-effecting shadow-memory store. Chain-carrying so
+    // it can't be DCE'd / hoisted. Operands: {chain, addr, data}.
+    SDValue Addr = getValue(I.getArgOperand(0));
+    SDValue Data = getValue(I.getArgOperand(1));
+    SDValue Node = DAG.getNode(ISD::UNSAFE_SHADOW_STORE, sdl, MVT::Other,
+                               getRoot(), Addr, Data);
+    DAG.setRoot(Node);
+    return;
+  }
+  case Intrinsic::unsafe_shadow_tie: {
+    // SoundSpec idempotent tie of gen and dep tokens. Chain-carrying.
+    // Operands: {chain, gentok, deptok}.
+    SDValue Gen = getValue(I.getArgOperand(0));
+    SDValue Dep = getValue(I.getArgOperand(1));
+    SDValue Node = DAG.getNode(ISD::UNSAFE_SHADOW_TIE, sdl, MVT::Other,
+                               getRoot(), Gen, Dep);
     DAG.setRoot(Node);
     return;
   }

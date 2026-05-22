@@ -4246,6 +4246,12 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
       return replaceInstUsesWith(*II, II->getArgOperand(0));
     break;
   }
+  case Intrinsic::unsafe_shadow_tie:
+    // SoundSpec: `shadow.tie(%x, %x)` is a no-op — tying a token to
+    // itself carries no information. Erase the call entirely.
+    if (II->getArgOperand(0) == II->getArgOperand(1))
+      return eraseInstFromFunction(*II);
+    break;
   default: {
     // Handle target specific intrinsics
     std::optional<Instruction *> V = targetInstCombineIntrinsic(*II);

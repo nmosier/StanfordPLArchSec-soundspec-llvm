@@ -2142,6 +2142,8 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::UNSAFE_SHADOW_XMIT:
       case TargetOpcode::UNSAFE_SHADOW_ARG:
       case TargetOpcode::UNSAFE_SHADOW_EMBED:
+      case TargetOpcode::UNSAFE_SHADOW_STORE:
+      case TargetOpcode::UNSAFE_SHADOW_TIE:
         // SoundSpec scope-region markers: purely meta. Stripped at
         // AsmPrinter (emit nothing). For UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP
         // and UNSAFE_SHADOW_GEN/DEP, the `Constraints = "$src = $dst"`
@@ -2187,6 +2189,12 @@ void AsmPrinter::emitFunctionBody() {
             break;
           case TargetOpcode::UNSAFE_SHADOW_EMBED:
             OutStreamer->emitRawComment("UNSAFE_SHADOW_EMBED");
+            break;
+          case TargetOpcode::UNSAFE_SHADOW_STORE:
+            OutStreamer->emitRawComment("UNSAFE_SHADOW_STORE");
+            break;
+          case TargetOpcode::UNSAFE_SHADOW_TIE:
+            OutStreamer->emitRawComment("UNSAFE_SHADOW_TIE");
             break;
           }
         }

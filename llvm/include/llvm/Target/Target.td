@@ -1484,7 +1484,7 @@ def UNSAFE_CLOSE : StandardPseudoInstruction {
 // three means AsmPrinter emits no bytes for them.
 def UNSAFE_SHADOW_GEN : StandardPseudoInstruction {
   let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins i32imm:$scope);
+  let InOperandList = (ins unknown:$scope);
   let AsmString = "";
   let hasSideEffects = true;
   let isMeta = true;

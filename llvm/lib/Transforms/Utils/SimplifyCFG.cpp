@@ -1215,8 +1215,12 @@ static void cloneInstructionsIntoPredecessorBlockAndUpdateSSAUses(
     RemapDbgRecordRange(NewBonusInst->getModule(), Range, VMap,
                         RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
 
-    NewBonusInst->takeName(&BonusInst);
-    BonusInst.setName(NewBonusInst->getName() + ".old");
+    // Void instructions can't carry names; skip the rename for them
+    // (e.g. speculatable void intrinsics like @llvm.unsafe.shadow.tie).
+    if (!BonusInst.getType()->isVoidTy()) {
+      NewBonusInst->takeName(&BonusInst);
+      BonusInst.setName(NewBonusInst->getName() + ".old");
+    }
     VMap[&BonusInst] = NewBonusInst;
 
     // Update (liveout) uses of bonus instructions,

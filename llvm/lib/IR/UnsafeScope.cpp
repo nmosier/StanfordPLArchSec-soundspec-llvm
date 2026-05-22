@@ -1,10 +1,15 @@
 #include "llvm/IR/UnsafeScope.h"
 #include "LLVMContextImpl.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -69,15 +74,21 @@ static void appendPredecessors(Instruction *I,
   }
 }
 
-static uint32_t getInt32(Metadata *MD) {
-  auto *CAM = cast<ConstantAsMetadata>(MD);
-  auto *C = cast<ConstantInt>(CAM->getValue());
-  return C->getLimitedValue();
+static void sortUniqueMetadata(SmallVectorImpl<Metadata *> &MDs) {
+  llvm::sort(MDs, [&](auto *A, auto *B) { return A->getMetadataID() < B->getMetadataID(); });
+  MDs.erase(llvm::unique(MDs), MDs.end());
 }
 
-static void sortUniqueMetadata(SmallVectorImpl<Metadata *> &MDs) {
-  llvm::sort(MDs, [&](auto *A, auto *B) { return getInt32(A) < getInt32(B); });
-  MDs.erase(llvm::unique(MDs), MDs.end());
+bool unsafe::isValidScope(Metadata *ID) {
+  auto *IDT = dyn_cast<MDTuple>(ID);
+  if (!IDT)
+    return false;
+  if (IDT->getNumOperands() != 1)
+    return false;
+  Metadata *Child = IDT->getOperand(0);
+  if (IDT != Child)
+    return false;
+  return true;
 }
 
 MDNode *unsafe::mergeMetadata(MDNode *A, MDNode *B) {
@@ -104,9 +115,17 @@ MDNode *unsafe::removeID(MDNode *MD, uint64_t ID) {
 }
 
 bool llvm::isSpeculationPrimitive(const Instruction &I) {
+  // If register-only, never speculation primitive.
   if (isa<BinaryOperator, UnaryOperator, CastInst, CmpInst>(&I))
     return false;
 
+  // Check if it's an intrinsic that may write memory.
+  if (auto *II = dyn_cast<IntrinsicInst>(&I);
+      II && II->mayWriteToMemory() && !II->isDebugOrPseudoInst() &&
+      !II->isAssumeLikeIntrinsic() && !II->onlyAccessesInaccessibleMemory()) {
+    return true;
+  }
+  
   switch (I.getOpcode()) {
   case Instruction::Br:
     return cast<BranchInst>(I).isConditional();
@@ -119,9 +138,9 @@ bool llvm::isSpeculationPrimitive(const Instruction &I) {
   case Instruction::CallBr:
     return cast<CallBrInst>(I).getNumIndirectDests() > 0;
 
-  case Instruction::Invoke:
   case Instruction::Call:
-    return cast<CallBase>(I).isIndirectCall();
+  case Instruction::Invoke:
+    return cast<CallBase>(&I)->isIndirectCall();
 
   case Instruction::Unreachable:
   case Instruction::Ret:
@@ -238,15 +257,7 @@ static void enumerateDepsImpl(SmallVectorImpl<const Value *> &Todo, LLVMContext 
   }
 }
 
-MDNode *unsafe::enumerateArgumentDeps(const CallBase &I, unsigned ArgNo) {
-  LLVMContext &Ctx = I.getContext();
-  SmallVector<Metadata *> IDs;
-  SmallVector<const Value *> Todo;
-  Todo.push_back(I.getArgOperand(ArgNo));
-  enumerateDepsImpl(Todo, Ctx, IDs);
-  return MDNode::get(Ctx, IDs);
-}
-
+// TODO: Is this dead code?
 MDNode *unsafe::enumerateTransmitterDeps(const Instruction &I) {
   LLVMContext &Ctx = I.getContext();
   SmallVector<Metadata *> IDs;
@@ -322,6 +333,8 @@ bool unsafe::isRelevantCall(const Instruction &I) {
   case Intrinsic::unsafe_shadow_xmit:
   case Intrinsic::unsafe_shadow_arg:
   case Intrinsic::unsafe_shadow_embed:
+  case Intrinsic::unsafe_shadow_store:
+  case Intrinsic::unsafe_shadow_tie:
     return false;
     // We should mark llvm.unsafe.shadow.gen with the !unsafe scope it belongs to.
   case Intrinsic::unsafe_shadow_gen:
@@ -358,13 +371,6 @@ Value *unsafe::getDepOperand(Instruction &I, unsigned Idx) {
   return I.getOperand(Idx);
 }
 
-uint32_t unsafe::getScopeFromMetadata(const Metadata *MD) {
-  auto *CAM = cast<ConstantAsMetadata>(MD);
-  auto *C = CAM->getValue();
-  auto *CI = cast<ConstantInt>(C);
-  return CI->getZExtValue();
-}
-
 MDNode *unsafe::addIDToSet(MDNode *Set, Metadata *ID) {
   auto &Ctx = Set->getContext();
   return mergeMetadata(Set, MDNode::get(Ctx, {ID}));
@@ -375,20 +381,6 @@ void unsafe::addIDToMetadataSetInPlace(Instruction &I, StringRef Key,
   auto *Set = I.getMetadata(Key);
   Set = addIDToSet(Set, ID);
   I.setMetadata(Key, Set);
-}
-
-uint32_t unsafe::getMaxScopeID(const Function &F) {
-  uint32_t Best = 0;
-  for (const Instruction &I : instructions(F)) {
-    auto *IDs = I.getMetadata(LLVMContext::MD_unsafe);
-    if (!IDs)
-      continue;
-    for (Metadata *ID : IDs->operands()) {
-      auto IntID = getInt32(ID);
-      Best = std::max<uint32_t>(Best, IntID);
-    }
-  }
-  return Best;
 }
 
 bool unsafe::hasID(const Instruction &I, Metadata *ID) {
@@ -515,114 +507,336 @@ void UnsafeScope::computeScopeSet(Function &F, Metadata *ID) {
   assert(Seen.size() >= Scope.size()); // RPO doesn't include unreachable blocks...
 }
 
-MDNode *unsafe::prepareCallSiteToUnsafeFnForInlining(CallBase *C) {
-  assert(C->hasFnAttr(Attribute::Unsafe));
-  assert(!C->getMetadata(LLVMContext::MD_unsafe));
-  assert(C->getMetadata(LLVMContext::MD_safe));
-
-  auto &F = *C->getFunction();
-  auto &Ctx = F.getContext();
-
-  // Strip all @llvm.unsafe.shadow.embed(arg, dep) calls.
-  IRBuilder<> IRB(C);
-  Value *Deps = nullptr;
-  for (Use &Arg : C->args()) {
-    auto *ArgII = dyn_cast<IntrinsicInst>(Arg.get());
-    if (!ArgII || ArgII->getIntrinsicID() != Intrinsic::unsafe_shadow_embed)
-      continue;
-    Arg.set(ArgII->getArgOperand(0));
-    auto *Dep = ArgII->getArgOperand(1);
-    // Don't do this:
-    // ArgII->eraseFromParent();
-    // because we can DCE it, and another call might have gotten it via CSE.
-    if (Deps) {
-      Deps = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_dep, {Deps, Dep});
-    } else {
-      Deps = Dep;
-    }
-  }
-
-  // Get fresh unsafe scope ID.
-  auto IntID = getMaxScopeID(F) + 1;
-  Metadata *ID = ConstantAsMetadata::get(IRB.getInt32(IntID));
-  MDNode *MD = MDNode::get(Ctx, {ID});
-
-  // Create Gen intrinsic. The second arg is the scope-id immediate that
-  // makes each gen structurally distinct per scope (so SimplifyCFG /
-  // CSE don't merge gens from different scopes).
-  if (!Deps)
-    Deps = IRB.getInt32(0); // TODO: Should this be a more specific number, like the scope ID?
-  auto *Gen = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_gen,
-                                  {Deps, IRB.getInt32(IntID)});
-  Gen->setMetadata(LLVMContext::MD_unsafe, MD);
-
-  // If the call had a return value, then we should expect it be wrapped in
-  // llvm.unsafe.shadow.arg, unless it's dead.
-  if (!C->getType()->isVoidTy()) {
-    // Rewrite any llvm.unsafe.shadow.arg uses.
-    for (Use &U : make_early_inc_range(C->uses())) {
-      auto *II = dyn_cast<IntrinsicInst>(U.getUser());
-      if (!II || II->getIntrinsicID() != Intrinsic::unsafe_shadow_arg)
-        continue;
-      II->replaceAllUsesWith(Gen);
-      II->eraseFromParent();
-    }
-  }
-
-  // The actual inliner should stamp all speculation primitives, transmitters, and relevant calls with this.
-  return MD;
-}
-
-void unsafe::postProcessUnsafeFnAfterInlining(Function &F) {
-  assert(F.hasFnAttribute(Attribute::Unsafe));
+static Instruction *promoteSafeCallToUnsafeFnToUnsafeCall(CallBase &C) {
+  using namespace unsafe;
+  using namespace llvm::PatternMatch;
   
-  // The easiest approach might just be to replace everything with
-  // constants and let DCE remove the rest.
-  auto &Ctx = F.getContext();
-  auto *DummyInt = ConstantInt::get(IntegerType::get(Ctx, 32), 0);
-  SmallVector<Instruction *> ToRemove;
-  for (auto &I : instructions(F)) {
-    auto *II = dyn_cast<IntrinsicInst>(&I);
-    if (!II)
+  assert(C.hasFnAttr(Attribute::Unsafe));
+  assert(C.getMetadata(LLVMContext::MD_safe));
+  assert(!C.getMetadata(LLVMContext::MD_unsafe));
+
+  auto &Ctx = C.getContext();
+
+  // Mint a new unsafe scope.
+  auto *ID = createNewScope(Ctx);
+  auto *IDs = getScopeSet(Ctx, {ID});
+
+  // Update call's metadata.
+  C.setMetadata(LLVMContext::MD_safe, nullptr);
+  C.setMetadata(LLVMContext::MD_unsafe, IDs);
+
+  // Insert @llvm.unsafe.shadow.gen before the call.
+  IRBuilder<> IRB(&C);
+  auto *Gen = createGenIntrinsic(IRB, ID);
+
+  // Insert @llvm.unsafe.shadow.tie for each argument.
+  for (Value *ArgV : C.args()) {
+    // Does this have a @llvm.unsafe.shadow.embed(%arg, %dep)?
+    // If so, convert to tie.
+    // If not, then there was no dep.
+    auto *ArgI = dyn_cast<Instruction>(ArgV);
+    if (!ArgI)
       continue;
-    switch (II->getIntrinsicID()) {
-    case Intrinsic::unsafe_shadow_arg:
-    case Intrinsic::unsafe_shadow_dep:
-    case Intrinsic::unsafe_shadow_gen:
-      II->replaceAllUsesWith(DummyInt);
-      ToRemove.push_back(II);
-      break;
-    case Intrinsic::unsafe_shadow_embed:
-      II->replaceAllUsesWith(II->getArgOperand(0));
-      ToRemove.push_back(II);
-      break;
-    default:
-      break;
-    }
+    Value *OrigArg = nullptr;
+    Value *Dep = nullptr;
+    if (!match(ArgI, m_Intrinsic<Intrinsic::unsafe_shadow_embed>(
+                         m_Value(OrigArg), m_Value(Dep))))
+      continue;
+    
+    ArgI->replaceAllUsesWith(OrigArg);
+    ArgI->eraseFromParent();
+    IRBuilder<> IRB(&C);
+    IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_tie, {Gen, Dep});
   }
 
-  for (Instruction *I : ToRemove)
-    I->eraseFromParent();
+  // Replace uses of any trailing !@*.arg with Gen,.
+  if (!C.getType()->isVoidTy())
+    for (User *U : C.users())
+      if (match(U, m_Intrinsic<Intrinsic::unsafe_shadow_arg>()))
+        U->replaceAllUsesWith(Gen);
+
+  return Gen;
 }
 
-void llvm::replaceUnsafeScopeWith(Function &F, MDNode *OldID, MDNode *NewID) {
-  if (OldID == NewID)
-    return;
-  for (auto &I : instructions(F)) {
-    if (I.getMetadata(LLVMContext::MD_unsafe) != OldID)
-      continue;
-    I.setMetadata(LLVMContext::MD_unsafe, NewID);
-    auto *II = dyn_cast<IntrinsicInst>(&I);
-    if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
-      assert(II->getArgOperand(1) == cast<ConstantAsMetadata>(OldID->getOperand(0))->getValue());
-      II->setArgOperand(1, cast<ConstantAsMetadata>(NewID->getOperand(0))->getValue());
+void GenAnalysisImpl::dump() { print(errs()); }
+
+void GenAnalysisImpl::print(raw_ostream &OS) {
+  OS << "=== GEN ANALYSIS FOR UNSAFE SCOPE " << *ID << " ===\n";
+  for (auto *I : Gens)
+    OS << *I << "\n";
+  OS << "=== END GEN ANALYSIS ===\n";
+}
+
+void GenAnalysisImpl::run() {
+  for (auto &I : instructions(F))
+    if (getGen(&I))
+      Gens.push_back(&I);
+}
+
+bool GenAnalysisImpl::getGen(Value *V) {
+  using namespace llvm::PatternMatch;
+
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I)
+    return false;
+
+  if (match(I, m_Intrinsic<Intrinsic::unsafe_shadow_gen>(m_Specific(IDVal))))
+    return true;
+
+  auto *PHI = dyn_cast<PHINode>(I);
+  if (!PHI)
+    return false;
+
+  // Have we cached this PHI node?
+  auto Result = Cache.insert({PHI, true});
+  bool &IsPHIGen = Result.first->second;
+  if (!Result.second)
+    return IsPHIGen;
+
+  // If not, recompute.
+  IsPHIGen = all_of(PHI->incoming_values(), [&](Value *Incoming) {
+    return getGen(Incoming);
+  });
+
+  return IsPHIGen;
+}
+
+Metadata *unsafe::getUniqueScope(Instruction &I) {
+  auto *IDs = I.getMetadata(LLVMContext::MD_unsafe);
+  assert(IDs->getNumOperands() == 1);
+  Metadata *ID = IDs->getOperand(0);
+  assert(isValidScope(ID));
+  return ID;
+}
+
+
+Instruction *unsafe::normalizeCallSiteBeforeInliningIntoSafeFn(CallBase &C) {
+  Function &F = *C.getFunction();
+  assert(!F.hasFnAttribute(Attribute::Unsafe));
+  auto &Ctx = F.getContext();
+
+  bool SafeCall = C.getMetadata(LLVMContext::MD_safe);
+  bool UnsafeCallee = C.hasFnAttr(Attribute::Unsafe);
+  if (SafeCall && !UnsafeCallee)
+    return nullptr;
+
+  // Promote safe call to unsafe fn to unsafe call.
+  if (SafeCall && C.hasFnAttr(Attribute::Unsafe))
+    return promoteSafeCallToUnsafeFnToUnsafeCall(C);
+
+  // Find the gen that reaches the unsafe call.
+  auto *ID = getUniqueScope(C);
+  IRBuilder<> IRB(&C);
+  return createGenIntrinsic(IRB, ID);
+}
+
+void unsafe::tieLoadResult(Instruction &I, Value *Gen) {
+  assert(isa<LoadInst>(&I));
+  IRBuilder<> IRB(I.getNextNode());
+  auto *Dep = IRB.CreateUnaryIntrinsic(Intrinsic::unsafe_shadow_arg, &I);
+  IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_tie, {Gen, Dep});
+}
+
+/// Returns whether the instruction was erased.
+static bool removeAllScopeInfo(Instruction &I) {
+  auto &Ctx = I.getContext();
+
+  if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::unsafe_shadow_gen:
+    case Intrinsic::unsafe_shadow_dep:
+    case Intrinsic::unsafe_shadow_arg:
+      I.replaceAllUsesWith(ConstantInt::get(IntegerType::get(Ctx, 32), 0));
+      I.eraseFromParent();
+      return true;
+
+    case Intrinsic::unsafe_shadow_tie:
+      I.eraseFromParent();
+      return true;
+
+    case Intrinsic::unsafe_shadow_embed:
+      I.replaceAllUsesWith(II->getArgOperand(0));
+      I.eraseFromParent();
+      return true;
     }
   }
+
+  // Strip any !unsafe/!safe metadata.
+  I.setMetadata(LLVMContext::MD_unsafe, nullptr);
+  I.setMetadata(LLVMContext::MD_safe, nullptr);
+
+  return false;
+}
+
+static void postProcessInstructionInlinedFromUnsafeCall(Instruction &I,
+                                                        MDNode *IDs,
+                                                        Instruction *Gen) {
+  auto &Ctx = I.getContext();
+
+  // Strip all scope information.
+  if (removeAllScopeInfo(I))
+    return;
+
+  // Stamp speculation primitives, calls, and transmitters.
+  if (isSpeculationPrimitive(I) || isTransmitter(I) ||
+      unsafe::isRelevantCall(I)) {
+    I.setMetadata(LLVMContext::MD_unsafe, IDs);
+  } else {
+    I.setMetadata(LLVMContext::MD_safe, MDNode::get(Ctx, {}));
+  }
+
+  // Extract and tag load dependencies.
+  if (isa<LoadInst>(&I))
+    unsafe::tieLoadResult(I, Gen);
+}
+
+unsafe::InliningCookie unsafe::prepareCallSiteForInlining(CallBase &C) {
+  auto &F = *C.getFunction();
+
+  // If the caller is unsafe, then there's nothing to do.
+  if (F.hasFnAttribute(Attribute::Unsafe))
+    return {};
+
+  InliningCookie Info;
+  Info.Gen = normalizeCallSiteBeforeInliningIntoSafeFn(C);
+  if (Info.Gen) {
+    auto *IDs = C.getMetadata(LLVMContext::MD_unsafe);
+    assert(IDs);
+    assert(IDs->getNumOperands() == 1);
+    Info.ID = IDs->getOperand(0);
+  }
+
+  return Info;
+}
+
+void unsafe::postProcessInlinedBlocks(iterator_range<Function::iterator> Blocks,
+                                      InliningCookie Info) {
+  assert(!Blocks.empty());
+  auto &F = *Blocks.begin()->getParent();
+  auto &Ctx = F.getContext();
+
+  // If this was an unsafe-attr function, just strip stuff out.
+  if (F.hasFnAttribute(Attribute::Unsafe)) {
+    for (auto &B : Blocks)
+      for (auto &I : make_early_inc_range(B))
+        removeAllScopeInfo(I);
+    return;
+  }
+
+  // Otherwise, it's a safe-attr function.
+  // If the call was !unsafe, then strip all scope info and then stamp.
+  if (Info.Gen) {
+    for (auto &B : Blocks)
+      for (auto &I : make_early_inc_range(B))
+        postProcessInstructionInlinedFromUnsafeCall(
+            I, Info.Gen->getMetadata(LLVMContext::MD_unsafe), Info.Gen);
+    return;
+  }
+
+  // The call was !safe.
+  // We need to duplicate all scopes.
+  SmallDenseMap<Metadata *, Metadata *> Map;
+  auto GetNewID = [&](Metadata *OldID) {
+    auto &NewID = Map[OldID];
+    if (!NewID)
+      NewID = createNewScope(Ctx);
+    return NewID;
+  };
+  // TODO: Would be nice to refactor with replacement function.
+  for (auto &B : Blocks)
+    for (auto &I : B) {
+      if (auto *OrigIDs = I.getMetadata(LLVMContext::MD_unsafe)) {
+        SmallVector<Metadata *> NewIDVec;
+        transform(OrigIDs->operands(), std::back_inserter(NewIDVec), GetNewID);
+        I.setMetadata(LLVMContext::MD_unsafe, getScopeSet(Ctx, NewIDVec));
+      }
+
+      if (auto *II = dyn_cast<IntrinsicInst>(&I);
+          II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
+        auto *OldArg = II->getArgOperand(0);
+        auto *OldID = cast<MetadataAsValue>(OldArg)->getMetadata();
+        auto *NewID = GetNewID(OldID);
+        auto *NewArg = MetadataAsValue::get(Ctx, NewID);
+        II->setArgOperand(0, NewArg);
+      }
+    }
 }
 
 void unsafe::setUnsafeScope(Instruction &I, MDNode *ID) {
   I.setMetadata(LLVMContext::MD_unsafe, ID);
   if (auto *II = dyn_cast<IntrinsicInst>(&I);
       II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen)
-    II->setArgOperand(1, cast<ConstantAsMetadata>(ID->getOperand(0))->getValue());
+    II->setArgOperand(
+        0, MetadataAsValue::get(I.getContext(), ID->getOperand(0)));
+}
+
+void UnsafeScope::print(raw_ostream &OS) {
+  OS << "=== Scope " << *ID << " in " << F.getName() << " ===\n";
+  for (auto *I : Scope) {
+    StringRef Prefix = " ";
+    if (DomSet.contains(I))
+      Prefix = "D";
+    OS << Prefix << " " << *I << "\n";
+  }
+}
+
+void UnsafeScope::dump() {
+  print(errs());
+}
+
+MDNode *unsafe::createNewScope(LLVMContext &Ctx) {
+  auto Tmp = MDNode::getTemporary(Ctx, {});
+  auto *Scope = MDTuple::getDistinct(Ctx, {Tmp.get()});
+  Scope->replaceOperandWith(0, Scope);
+  return Scope;
+}
+
+MDNode *unsafe::getScopeSet(LLVMContext &Ctx, ArrayRef<Metadata *> IDs) {
+  return MDNode::get(Ctx, IDs);
+}
+
+static MDNode *replaceUnsafeScopeInList(LLVMContext &Ctx, MDNode *List,
+                                        Metadata *Old, Metadata *New) {
+  if (!List || !is_contained(List->operands(), Old))
+    return List;
+  SmallVector<Metadata *> IDs;
+  for (Metadata *ID : List->operands())
+    IDs.push_back(ID == Old ? New : Old);
+  return MDNode::get(Ctx, IDs);
+}
+
+static void replaceUnsafeScopeForShadowIntrinsic(Instruction &I, Metadata *Old,
+                                                 Metadata *New) {
+  auto &Ctx = I.getContext();
+  auto *II = dyn_cast<IntrinsicInst>(&I);
+  if (!II)
+    return;
+  switch (II->getIntrinsicID()) {
+  case Intrinsic::unsafe_shadow_gen: {
+    auto *ID = cast<MetadataAsValue>(II->getArgOperand(0))->getMetadata();
+    if (ID == Old)
+      II->setArgOperand(0, MetadataAsValue::get(Ctx, New));
+    return;
+  }
+  }
+}
+
+void llvm::replaceUnsafeScopeWith(Function &F, Metadata *Old, Metadata *New) {
+  assert(unsafe::isValidScope(Old));
+  assert(unsafe::isValidScope(New));
+  auto &Ctx = F.getContext();
+  for (auto &I : instructions(F)) {
+    auto *OldIDs = I.getMetadata(LLVMContext::MD_unsafe);
+    auto *NewIDs = replaceUnsafeScopeInList(Ctx, OldIDs, Old, New);
+    I.setMetadata(LLVMContext::MD_unsafe, NewIDs);
+    replaceUnsafeScopeForShadowIntrinsic(I, Old, New);
+  }
+}
+
+CallInst *unsafe::createGenIntrinsic(IRBuilderBase &IRB, Metadata *ID) {
+  auto &Ctx = IRB.getContext();
+  auto *Gen = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_gen,
+                                  MetadataAsValue::get(Ctx, ID));
+  Gen->setMetadata(LLVMContext::MD_unsafe, MDNode::get(Ctx, {ID}));
+  return Gen;
 }

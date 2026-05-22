@@ -4,6 +4,7 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/MapVector.h"
 
 namespace llvm {
 
@@ -44,8 +45,6 @@ MDNode *enumerateTransmitterDeps(const Instruction &I);
 // Enumerate direct dependencies of an unsafe scope.
 MDNode *enumerateScopeDeps(int ID, const Function &F);
 
-MDNode *enumerateArgumentDeps(const CallBase &I, unsigned ArgNo);
-
 MDNode *enumerateDeps(const Value *V);
 
 MDNode *loopMetadata(const Loop &L);
@@ -55,30 +54,47 @@ bool isRelevantCall(const Instruction &I);
 unsigned getNumDepOperands(const Instruction &I);
 Value *getDepOperand(Instruction &I, unsigned Idx);
 
-uint32_t getScopeFromMetadata(const Metadata *MD);
-
 MDNode *addIDToSet(MDNode *Set, Metadata *ID);
 
 void addIDToMetadataSetInPlace(Instruction &I, StringRef Key, Metadata *ID);
 
-uint32_t getMaxScopeID(const Function &F);
-
 bool hasID(const Instruction &I, Metadata *ID);
-
-/// Call this before inlining a !safe-metadata call to an unsafe-attr function.
-/// It inserts and removes some intrinsics directly before the call,
-/// and removes some intrinsics right after the call.
-/// It allocates a new unsafe scope and returns it.
-/// All transmitters (isTransmitter), speculation primitives
-/// (isSpeculationPrimitive), and relevant calls (isRelevantCall)
-/// should be then tagged with the returned unsafe scope.
-MDNode *prepareCallSiteToUnsafeFnForInlining(CallBase *C);
 
 /// Call this after inlining a non-unsafe-attr function into an unsafe-attr function.
 /// It removes llvm.unsafe.shadow.* intrinsics from the callee.
-void postProcessUnsafeFnAfterInlining(Function &F);
+void postProcessAfterInliningIntoUnsafeFn(Function &F);
 
 void setUnsafeScope(Instruction &I, MDNode *ID);
+
+MDNode *createNewScope(LLVMContext &Ctx);
+
+MDNode *getScopeSet(LLVMContext &Ctx, ArrayRef<Metadata *> IDs);
+
+struct InliningCookie {
+  /// The call's !unsafe scope ID, if any.
+  /// nullptr = the call was safe.
+  Metadata *ID = nullptr;
+  /// If the call was !unsafe, then this is the producer
+  /// of the scope's gen.
+  Instruction *Gen = nullptr;
+};
+
+InliningCookie prepareCallSiteForInlining(CallBase &C);
+void postProcessInlinedBlocks(iterator_range<Function::iterator> Blocks, InliningCookie Info);
+
+Instruction *normalizeCallSiteBeforeInliningIntoSafeFn(CallBase &C);
+
+/// Call this on each inlined basic block of an inlined !unsafe call.
+/// IDs should be the !unsafe scope set on the call.
+void postProcessBlockInlinedFromUnsafeCall(BasicBlock &B, MDNode *IDs, Instruction *Gen);
+
+void tieLoadResult(Instruction &I, Value *Gen);
+
+bool isValidScope(Metadata *ID);
+
+Metadata *getUniqueScope(Instruction &I);
+
+CallInst *createGenIntrinsic(IRBuilderBase &IRB, Metadata *ID);
 
 }
 
@@ -119,8 +135,30 @@ public:
   void dump();
 };
 
-// TODO: Might be able to remove.
-void replaceUnsafeScopeWith(Function &F, MDNode *OldID, MDNode *NewID);
+void replaceUnsafeScopeWith(Function &F, Metadata *Old, Metadata *New);
+
+class GenAnalysisImpl {
+  Function &F;
+  LLVMContext &Ctx;
+  Metadata *ID;
+  Value *IDVal;
+  MapVector<PHINode *, bool> Cache;
+  SmallVector<Instruction *> Gens;
+
+  bool getGen(Value *V);
+
+public:
+  GenAnalysisImpl(Function &F, Metadata *ID)
+      : F(F), Ctx(F.getContext()), ID(ID), IDVal(MetadataAsValue::get(Ctx, ID)) {}
+
+  void run();
+
+  auto begin() { return Gens.begin(); }
+  auto end() { return Gens.end(); }
+
+  void print(raw_ostream &OS);
+  void dump();
+};
 
 } // namespace llvm
 
