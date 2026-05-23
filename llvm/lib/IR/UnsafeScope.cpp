@@ -651,6 +651,7 @@ static bool removeAllScopeInfo(Instruction &I) {
       return true;
 
     case Intrinsic::unsafe_shadow_tie:
+    case Intrinsic::unsafe_shadow_xmit:
       I.eraseFromParent();
       return true;
 
@@ -794,6 +795,12 @@ MDNode *unsafe::createNewScope(LLVMContext &Ctx) {
 MDNode *unsafe::getScopeSet(LLVMContext &Ctx, ArrayRef<Metadata *> IDs) {
   return MDNode::get(Ctx, IDs);
 }
+
+MDNode *unsafe::createNewXmit(LLVMContext &Ctx) {
+  // For now, createNewScope() does exactly what we need.
+  return createNewScope(Ctx);
+}
+
 
 static MDNode *replaceUnsafeScopeInList(LLVMContext &Ctx, MDNode *List,
                                         Metadata *Old, Metadata *New) {

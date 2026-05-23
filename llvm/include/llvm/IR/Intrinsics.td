@@ -1703,14 +1703,14 @@ def int_unsafe_shadow_embed : PureIntrinsic<
 
 // `void llvm.unsafe.shadow.xmit(i32 %x)` is the side-effecting sink
 // that keeps shadow-token computations alive against DCE.
-// `IntrInaccessibleMemOnly` gives it the minimum side effects needed
-// to survive DCE without forcing a full memory barrier; ordinary
-// loads/stores may still be reordered around it. NOT speculatable,
-// NOT convergent (request explicitly if either is wanted).
+// `IntrInaccessibleMemOnly` + `IntrSpeculatable` + `IntrIdempotent`:
+// the effect is a monotonic latched bit keyed on the operand, so two
+// xmits with the same token are CSE-equivalent and can be hoisted /
+// duplicated freely.
 def int_unsafe_shadow_xmit : DefaultAttrsIntrinsic<
     [],
     [llvm_i32_ty],
-    [IntrInaccessibleMemOnly]>;
+    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
 
 // `void llvm.unsafe.shadow.store(i32 %shadowaddr, i32 %shadowdata)`
 // is a side-effecting shadow-memory store. Like `shadow.xmit`,

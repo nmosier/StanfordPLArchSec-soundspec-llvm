@@ -2,6 +2,7 @@
 #define LLVM_IR_UNSAFESCOPE_H
 
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/MapVector.h"
@@ -69,6 +70,8 @@ void setUnsafeScope(Instruction &I, MDNode *ID);
 MDNode *createNewScope(LLVMContext &Ctx);
 
 MDNode *getScopeSet(LLVMContext &Ctx, ArrayRef<Metadata *> IDs);
+
+MDNode *createNewXmit(LLVMContext &Ctx);
 
 struct InliningCookie {
   /// The call's !unsafe scope ID, if any.
