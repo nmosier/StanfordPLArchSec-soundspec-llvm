@@ -2959,6 +2959,12 @@ static void combineMetadata(Instruction *K, const Instruction *J,
       case LLVMContext::MD_unsafe_init:
       case LLVMContext::MD_unsafe_xmit:
       case LLVMContext::MD_unsafe_spec:
+      case LLVMContext::MD_soundspec_store:
+      case LLVMContext::MD_soundspec_xmit:
+        // K's tag already references a valid shadow.xmit/store call (which
+        // is idempotent and would itself be CSE'd alongside this merge),
+        // so keeping K's MD without modification preserves the
+        // transmitter↔xmit linkage.
         break;
       case LLVMContext::MD_dbg:
         llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");

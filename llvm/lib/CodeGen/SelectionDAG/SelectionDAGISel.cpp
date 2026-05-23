@@ -2660,6 +2660,19 @@ void SelectionDAGISel::Select_UNSAFE_SHADOW_TIE(SDNode *N) {
                        {N->getOperand(1), N->getOperand(2), N->getOperand(0)});
 }
 
+void SelectionDAGISel::Select_UNSAFE_BEGIN(SDNode *N) {
+  // SoundSpec unsafe-scope begin: chain-carrying pseudo, no data operands.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_BEGIN, N->getValueType(0),
+                       {N->getOperand(0)});
+}
+
+void SelectionDAGISel::Select_UNSAFE_END(SDNode *N) {
+  // SoundSpec unsafe-scope end: chain-carrying pseudo, no data inputs,
+  // produces an i32 result. Results are {i32, chain}.
+  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_END, N->getValueType(0),
+                       N->getValueType(1), {N->getOperand(0)});
+}
+
 void SelectionDAGISel::Select_UNSAFE_SHADOW_ARG(SDNode *N) {
   // SoundSpec shadow-token derived from an arbitrary-typed input. Single
   // operand passthrough; result is the fixed-type i32 shadow token. No
@@ -3485,6 +3498,12 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
     return;
   case ISD::UNSAFE_SHADOW_TIE:
     Select_UNSAFE_SHADOW_TIE(NodeToMatch);
+    return;
+  case ISD::UNSAFE_BEGIN:
+    Select_UNSAFE_BEGIN(NodeToMatch);
+    return;
+  case ISD::UNSAFE_END:
+    Select_UNSAFE_END(NodeToMatch);
     return;
   case ISD::STACKMAP:
     Select_STACKMAP(NodeToMatch);

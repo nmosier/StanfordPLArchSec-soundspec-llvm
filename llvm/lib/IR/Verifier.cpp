@@ -7915,12 +7915,12 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
   for (auto *B : ReachableBlocks)
     for (auto &I : *B)
       if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
-        XmitMDs.insert(I.getMetadata("soundspec.xmit"));
+        XmitMDs.insert(I.getMetadata(LLVMContext::MD_soundspec_xmit));
   for (auto *B : ReachableBlocks) {
     for (auto &I : *B) {
       if (isTransmitter(I) && I.getMetadata(LLVMContext::MD_safe)) {
         // !safe transmitters should also have !soundspec.xmit.
-        auto *MD = I.getMetadata("soundspec.xmit");
+        auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit);
         Check(MD, "!safe transmitters should have !soundspec.xmit", &I);
         Check(XmitMDs.contains(MD), "no @llvm.unsafe.shadow.xmit() for !safe transmitter", &I);
       }

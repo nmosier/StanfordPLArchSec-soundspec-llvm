@@ -146,22 +146,15 @@ class GenAnalysisImpl {
   Metadata *ID;
   Value *IDVal;
   MapVector<PHINode *, bool> Cache;
-  SmallVector<Instruction *> Gens;
-
-  bool getGen(Value *V);
 
 public:
   GenAnalysisImpl(Function &F, Metadata *ID)
       : F(F), Ctx(F.getContext()), ID(ID), IDVal(MetadataAsValue::get(Ctx, ID)) {}
 
-  void run();
-
-  auto begin() { return Gens.begin(); }
-  auto end() { return Gens.end(); }
-
-  void print(raw_ostream &OS);
-  void dump();
+  bool queryGen(Value *V);
 };
+
+void sortInstructionsInRPO(MutableArrayRef<Instruction *> Insts);
 
 } // namespace llvm
 

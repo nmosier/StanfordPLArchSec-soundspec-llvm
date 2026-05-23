@@ -21,6 +21,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -335,6 +336,8 @@ bool unsafe::isRelevantCall(const Instruction &I) {
   case Intrinsic::unsafe_shadow_embed:
   case Intrinsic::unsafe_shadow_store:
   case Intrinsic::unsafe_shadow_tie:
+  case Intrinsic::unsafe_begin:
+  case Intrinsic::unsafe_end:
     return false;
     // We should mark llvm.unsafe.shadow.gen with the !unsafe scope it belongs to.
   case Intrinsic::unsafe_shadow_gen:
@@ -558,22 +561,7 @@ static Instruction *promoteSafeCallToUnsafeFnToUnsafeCall(CallBase &C) {
   return Gen;
 }
 
-void GenAnalysisImpl::dump() { print(errs()); }
-
-void GenAnalysisImpl::print(raw_ostream &OS) {
-  OS << "=== GEN ANALYSIS FOR UNSAFE SCOPE " << *ID << " ===\n";
-  for (auto *I : Gens)
-    OS << *I << "\n";
-  OS << "=== END GEN ANALYSIS ===\n";
-}
-
-void GenAnalysisImpl::run() {
-  for (auto &I : instructions(F))
-    if (getGen(&I))
-      Gens.push_back(&I);
-}
-
-bool GenAnalysisImpl::getGen(Value *V) {
+bool GenAnalysisImpl::queryGen(Value *V) {
   using namespace llvm::PatternMatch;
 
   auto *I = dyn_cast<Instruction>(V);
@@ -595,7 +583,7 @@ bool GenAnalysisImpl::getGen(Value *V) {
 
   // If not, recompute.
   IsPHIGen = all_of(PHI->incoming_values(), [&](Value *Incoming) {
-    return getGen(Incoming);
+    return queryGen(Incoming);
   });
 
   return IsPHIGen;
@@ -846,4 +834,19 @@ CallInst *unsafe::createGenIntrinsic(IRBuilderBase &IRB, Metadata *ID) {
                                   MetadataAsValue::get(Ctx, ID));
   Gen->setMetadata(LLVMContext::MD_unsafe, MDNode::get(Ctx, {ID}));
   return Gen;
+}
+
+void llvm::sortInstructionsInRPO(MutableArrayRef<Instruction *> Insts) {
+  if (Insts.empty())
+    return;
+  SmallVector<Instruction *> Result;
+  SmallSet<Instruction *, 8> Set;
+  copy(Insts, std::inserter(Set, Set.end()));
+  auto *F = Insts[0]->getFunction();
+  for (auto *B : ReversePostOrderTraversal(F))
+    for (auto &I : *B)
+      if (Set.contains(&I))
+        Result.push_back(&I);
+  assert(Insts.size() == Result.size());
+  copy(Result, Insts.begin());
 }

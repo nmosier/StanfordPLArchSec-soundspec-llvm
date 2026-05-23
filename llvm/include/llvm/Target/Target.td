@@ -1544,6 +1544,23 @@ def UNSAFE_SHADOW_TIE : StandardPseudoInstruction {
   let hasSideEffects = true;
   let isMeta = true;
 }
+// SoundSpec unsafe-scope begin/end markers. No data inputs, no defs
+// (begin) / one i32 def (end). Stripped at AsmPrinter like the other
+// meta pseudos.
+def UNSAFE_BEGIN : StandardPseudoInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let isMeta = true;
+}
+def UNSAFE_END : StandardPseudoInstruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins);
+  let AsmString = "";
+  let hasSideEffects = true;
+  let isMeta = true;
+}
 
 def STACKMAP : StandardPseudoInstruction {
   let OutOperandList = (outs);

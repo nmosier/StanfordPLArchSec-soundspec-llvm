@@ -1653,6 +1653,14 @@ def int_unsafe_close : Intrinsic<
     [],
     [IntrConvergent]>;
 
+// `void @llvm.unsafe.begin()` marks the beginning of an unsafe scope.
+// `i32 @llvm.unsafe.end()` marks the end of an unsafe scope; result is
+// an opaque token. Both are modeled as full memory barriers — may
+// read/write all memory — so the optimizer cannot reorder ANY load or
+// store across them. NOT speculatable, NOT idempotent.
+def int_unsafe_begin : DefaultAttrsIntrinsic<[], [], []>;
+def int_unsafe_end : DefaultAttrsIntrinsic<[llvm_i32_ty], [], []>;
+
 // SoundSpec shadow-token intrinsics. Used to give producers without a
 // natural data input (e.g. `alloca !unsafe`) something for
 // `llvm.unsafe.dep` to thread through.
@@ -1723,15 +1731,15 @@ def int_unsafe_shadow_store : DefaultAttrsIntrinsic<
     [IntrInaccessibleMemOnly]>;
 
 // `void llvm.unsafe.shadow.tie(i32 %gentok, i32 %deptok)` ties a
-// shadow gen token to a dep token. `IntrInaccessibleMemOnly` +
-// `IntrSpeculatable` + `IntrIdempotent`: the call's effect is a
-// monotonic latched-bit set keyed on the operand pair, so two ties
-// with identical operands are CSE-equivalent and can be hoisted /
-// duplicated freely.
+// shadow gen token to a dep token. `IntrWriteMem` +
+// `IntrInaccessibleMemOnly` + `IntrSpeculatable` + `IntrIdempotent`:
+// write-only effect on inaccessible memory; monotonic latched-bit set
+// keyed on the operand pair, so two ties with identical operands are
+// CSE-equivalent and can be hoisted / duplicated freely.
 def int_unsafe_shadow_tie : DefaultAttrsIntrinsic<
     [],
     [llvm_i32_ty, llvm_i32_ty],
-    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
+    [IntrWriteMem, IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
 
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //

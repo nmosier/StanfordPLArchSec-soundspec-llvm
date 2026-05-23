@@ -1481,6 +1481,10 @@ enum NodeType {
   /// token to a shadow dep token. Operand 0 is the chain, operand 1 is
   /// the i32 gen token, operand 2 is the i32 dep token; single chain
   /// result.
+  /// UNSAFE_BEGIN: marks beginning of unsafe scope. Operand 0 is chain;
+  /// single chain result.
+  /// UNSAFE_END: marks end of unsafe scope. Operand 0 is chain; results
+  /// are {i32 token, chain}.
   UNSAFE_SHADOW_GEN,
   UNSAFE_SHADOW_DEP,
   UNSAFE_SHADOW_XMIT,
@@ -1488,6 +1492,8 @@ enum NodeType {
   UNSAFE_SHADOW_EMBED,
   UNSAFE_SHADOW_STORE,
   UNSAFE_SHADOW_TIE,
+  UNSAFE_BEGIN,
+  UNSAFE_END,
 
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for
