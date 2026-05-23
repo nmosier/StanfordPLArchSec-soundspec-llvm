@@ -789,6 +789,10 @@ MDNode *unsafe::createNewXmit(LLVMContext &Ctx) {
   return createNewScope(Ctx);
 }
 
+MDNode *unsafe::createNewXmitSet(LLVMContext &Ctx, ArrayRef<Metadata *> Xmits) {
+  return getScopeSet(Ctx, Xmits);
+}
+
 
 static MDNode *replaceUnsafeScopeInList(LLVMContext &Ctx, MDNode *List,
                                         Metadata *Old, Metadata *New) {
@@ -849,4 +853,16 @@ void llvm::sortInstructionsInRPO(MutableArrayRef<Instruction *> Insts) {
         Result.push_back(&I);
   assert(Insts.size() == Result.size());
   copy(Result, Insts.begin());
+}
+
+MDNode *unsafe::concatMetadataNodes(MDNode *A, MDNode *B) {
+  if (!A)
+    return B;
+  if (!B)
+    return A;
+  SmallVector<Metadata *> MDs;
+  copy(A->operands(), std::back_inserter(MDs));
+  copy(B->operands(), std::back_inserter(MDs));
+  auto &Ctx = A->getContext();
+  return MDNode::get(Ctx, MDs);
 }

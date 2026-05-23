@@ -1644,6 +1644,7 @@ bool EarlyCSE::processNode(DomTreeNode *Node) {
           continue;
         }
         combineIRFlags(Inst, InVal.first);
+        combineMetadataForCSE(InVal.first, &Inst, /*DoesKMove=*/false);
         if (!Inst.use_empty())
           Inst.replaceAllUsesWith(InVal.first);
         salvageKnowledge(&Inst, &AC);

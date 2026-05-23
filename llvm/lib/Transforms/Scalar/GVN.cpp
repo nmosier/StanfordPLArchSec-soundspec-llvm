@@ -1605,7 +1605,9 @@ void GVNPass::eliminatePartiallyRedundantLoad(
     for (unsigned Kind :
          {(unsigned)LLVMContext::MD_safe, (unsigned)LLVMContext::MD_unsafe,
           (unsigned)LLVMContext::MD_unsafe_xmit,
-          (unsigned)LLVMContext::MD_unsafe_spec})
+          (unsigned)LLVMContext::MD_unsafe_spec,
+          (unsigned)LLVMContext::MD_soundspec_xmit,
+          (unsigned)LLVMContext::MD_soundspec_store})
       if (auto *MD = Load->getMetadata(Kind))
         NewLoad->setMetadata(Kind, MD);
     if (auto *AccessMD = Load->getMetadata(LLVMContext::MD_access_group))

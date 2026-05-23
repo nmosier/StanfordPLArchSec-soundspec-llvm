@@ -61,6 +61,7 @@
 #include "llvm/IR/MemoryModelRelaxationAnnotations.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Type.h"
@@ -2960,11 +2961,16 @@ static void combineMetadata(Instruction *K, const Instruction *J,
       case LLVMContext::MD_unsafe_xmit:
       case LLVMContext::MD_unsafe_spec:
       case LLVMContext::MD_soundspec_store:
+        break;
       case LLVMContext::MD_soundspec_xmit:
-        // K's tag already references a valid shadow.xmit/store call (which
-        // is idempotent and would itself be CSE'd alongside this merge),
-        // so keeping K's MD without modification preserves the
-        // transmitter↔xmit linkage.
+        // [soundspec] Union the operand lists of K and J. After
+        // idempotent CSE of `llvm.unsafe.shadow.xmit()`, the surviving
+        // xmit must cover every transmitter that linked to either
+        // original. For transmitter↔transmitter merges, the union of
+        // single-element MDs widens the surviving transmitter's link to
+        // both source IDs — still valid since each ID is satisfied by
+        // some xmit's tuple.
+        K->setMetadata(Kind, unsafe::concatMetadataNodes(KMD, JMD));
         break;
       case LLVMContext::MD_dbg:
         llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");

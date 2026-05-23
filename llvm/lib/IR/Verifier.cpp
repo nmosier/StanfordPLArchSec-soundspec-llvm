@@ -7857,7 +7857,8 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
     while (!Todo.empty()) {
       auto *B = Todo.pop_back_val();
       if (ReachableBlocks.insert(B).second)
-        copy(successors(B), std::inserter(ReachableBlocks, ReachableBlocks.end()));
+        for (auto *Succ : successors(B))
+          Todo.push_back(Succ);
     }
   }
 
@@ -7911,18 +7912,34 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
   }
 
   // !soundspec.xmit checking.
-  SmallSet<MDNode *, 8> XmitMDs;
+  //
+  // Each `@llvm.unsafe.shadow.xmit()` carries a tuple of xmit IDs as
+  // its `!soundspec.xmit` metadata — the set of transmitters it
+  // covers. After CSE may merge multiple xmits, this tuple is the
+  // union (concat) of the originals' operand sets.
+  //
+  // Each `!safe` transmitter carries a `!soundspec.xmit` whose
+  // operand set is the set of IDs the transmitter links to. For an
+  // unmerged transmitter, that operand set is `{self}` (the
+  // self-referencing distinct MDNode itself); for CSE-merged
+  // transmitters the operand set is the concat of the originals'.
+  // Verifier requirement: every operand of the transmitter's MD must
+  // appear as an operand in some xmit's tuple.
+  SmallSet<Metadata *, 8> CoveredIDs;
   for (auto *B : ReachableBlocks)
     for (auto &I : *B)
       if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
-        XmitMDs.insert(I.getMetadata(LLVMContext::MD_soundspec_xmit));
+        if (auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit))
+          for (auto &Op : MD->operands())
+            CoveredIDs.insert(Op.get());
   for (auto *B : ReachableBlocks) {
     for (auto &I : *B) {
       if (isTransmitter(I) && I.getMetadata(LLVMContext::MD_safe)) {
-        // !safe transmitters should also have !soundspec.xmit.
         auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit);
         Check(MD, "!safe transmitters should have !soundspec.xmit", &I);
-        Check(XmitMDs.contains(MD), "no @llvm.unsafe.shadow.xmit() for !safe transmitter", &I);
+        for (auto &Op : MD->operands())
+          Check(CoveredIDs.contains(Op.get()),
+                "no @llvm.unsafe.shadow.xmit() covers transmitter ID", &I);
       }
     }
   }

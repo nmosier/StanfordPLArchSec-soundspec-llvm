@@ -73,6 +73,10 @@ MDNode *getScopeSet(LLVMContext &Ctx, ArrayRef<Metadata *> IDs);
 
 MDNode *createNewXmit(LLVMContext &Ctx);
 
+MDNode *createNewXmitSet(LLVMContext &Ctx, ArrayRef<Metadata *> Xmits);
+
+MDNode *concatMetadataNodes(MDNode *A, MDNode *B);
+
 struct InliningCookie {
   /// The call's !unsafe scope ID, if any.
   /// nullptr = the call was safe.
