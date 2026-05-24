@@ -1435,7 +1435,9 @@ bool JumpThreadingPass::simplifyPartiallyRedundantLoad(LoadInst *LoadI) {
     for (unsigned Kind :
          {(unsigned)LLVMContext::MD_safe, (unsigned)LLVMContext::MD_unsafe,
           (unsigned)LLVMContext::MD_unsafe_xmit,
-          (unsigned)LLVMContext::MD_unsafe_spec})
+          (unsigned)LLVMContext::MD_unsafe_spec,
+          (unsigned)LLVMContext::MD_soundspec_xmit,
+          (unsigned)LLVMContext::MD_soundspec_store})
       if (MDNode *MD = LoadI->getMetadata(Kind))
         NewVal->setMetadata(Kind, MD);
 

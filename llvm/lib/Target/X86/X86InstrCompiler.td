@@ -304,6 +304,64 @@ def SOUNDSPEC_CFI_SRC : PseudoI<
   let mayStore = 0;
 }
 
+// UNSAFE_WAIT is the SoundSpec wait-on-token marker. Encoded as
+//   0F 01 (D8+r)
+// which overlaps the AMD SVM instruction range (VMRUN, VMMCALL, etc.).
+// `isCodeGenOnly = 1` keeps this out of the disassembler / asm parser
+// tables so it doesn't conflict with those; the MC encoder still
+// emits the raw bytes. SoundSpec target silicon repurposes this
+// encoding.
+def UNSAFE_WAIT : I<0x01, MRM3r, (outs), (ins GR32:$tok),
+                    "unsafe_wait\t$tok", []>, TB,
+                  Sched<[]> {
+  let hasSideEffects = 1;
+  let mayLoad = 0;
+  let mayStore = 0;
+  let isCodeGenOnly = 1;
+}
+
+// UNSAFE_BEGIN marks the start of a SoundSpec unsafe scope. Encoded
+// as `0F 24` (no ModR/M, no operand). The 0F 24 byte sequence is
+// unused on modern x86; SoundSpec target silicon repurposes it.
+def UNSAFE_BEGIN : I<0x24, RawFrm, (outs), (ins),
+                     "unsafe_begin", []>, TB, Sched<[]> {
+  let hasSideEffects = 1;
+  let mayLoad = 0;
+  let mayStore = 0;
+  let isCodeGenOnly = 1;
+}
+
+// UNSAFE_END marks the end of a SoundSpec unsafe scope and produces
+// an i32 result. Encoded as `0F 01 (C0+r)` where r is the destination
+// register. This collides with VMCALL/VMLAUNCH/etc. on standard x86;
+// `isCodeGenOnly = 1` keeps it out of the disassembler.
+def UNSAFE_END : I<0x01, MRM0r, (outs GR32:$dst), (ins),
+                   "unsafe_end\t$dst", []>, TB, Sched<[]> {
+  let hasSideEffects = 1;
+  let mayLoad = 0;
+  let mayStore = 0;
+  let isCodeGenOnly = 1;
+}
+
+// SOUNDSPEC_PROTECT_GPR marks a GPR data value as data-dependent on a
+// dep token. Encoded as `0F 25 11.xxx.yyy` — TB prefix, opcode 0x25,
+// MRMSrcReg form. The reg field (xxx) carries the data GPR; the r/m
+// field (yyy) carries the dep GPR. Passthrough: $data is tied to
+// $dst so the data register is unchanged at the value level.
+// Maps to `llvm.unsafe.shadow.embed(data, tok)` for i32 values.
+// `0F 25` is historically MOV TR (removed in i486; #UD on modern x86);
+// `isCodeGenOnly = 1` is defensive.
+def SOUNDSPEC_PROTECT_GPR : I<0x25, MRMSrcReg, (outs GR32:$dst),
+                              (ins GR32:$data, GR32:$dep),
+                              "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
+                              []>, TB, Sched<[]> {
+  let Constraints = "$data = $dst";
+  let hasSideEffects = 1;
+  let mayLoad = 0;
+  let mayStore = 0;
+  let isCodeGenOnly = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // Pseudo instructions used by address sanitizer.
 //===----------------------------------------------------------------------===//

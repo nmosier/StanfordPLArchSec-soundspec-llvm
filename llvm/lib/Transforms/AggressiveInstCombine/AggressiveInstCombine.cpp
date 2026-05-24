@@ -53,6 +53,10 @@ STATISTIC(NumGuardedRotates,
 STATISTIC(NumGuardedFunnelShifts,
           "Number of guarded funnel shifts transformed into funnel shifts");
 STATISTIC(NumPopCountRecognized, "Number of popcount idioms recognized");
+STATISTIC(NumSoundSpecMergeStoresBailed,
+          "[soundspec] consecutive-store merges skipped because at least "
+          "one part store carries an !unsafe/!safe/!soundspec.store tag "
+          "and there is no single correct scope ID for the merged store");
 
 static cl::opt<unsigned> MaxInstrsToScan(
     "aggressive-instcombine-max-scan-instrs", cl::init(64), cl::Hidden,
@@ -892,6 +896,20 @@ static bool mergeConsecutivePartStores(ArrayRef<PartStore> Parts,
                                        TargetTransformInfo &TTI) {
   if (Parts.size() < 2)
     return false;
+
+  // [soundspec] Refuse to merge if any part carries scope/transmitter
+  // metadata. Different parts may belong to different unsafe scopes
+  // (distinct !unsafe IDs), and there is no single correct ID to
+  // attach to the merged store. The verifier requires every
+  // speculation primitive to carry !safe/!unsafe.
+  for (const PartStore &P : Parts) {
+    if (P.Store->getMetadata(LLVMContext::MD_unsafe) ||
+        P.Store->getMetadata(LLVMContext::MD_safe) ||
+        P.Store->getMetadata(LLVMContext::MD_soundspec_store)) {
+      ++NumSoundSpecMergeStoresBailed;
+      return false;
+    }
+  }
 
   // Check whether combining the stores is profitable.
   // FIXME: We could generate smaller stores if we can't produce a large one.

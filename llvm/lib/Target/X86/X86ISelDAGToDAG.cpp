@@ -5175,6 +5175,48 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
 
   switch (Opcode) {
   default: break;
+  case ISD::UNSAFE_WAIT: {
+    // SoundSpec wait: chain-carrying X86 pseudo with one GR32 register use
+    // (the token). ISD operand order is {chain, tok}; the MachineSDNode
+    // needs the chain at the tail.
+    CurDAG->SelectNodeTo(Node, X86::UNSAFE_WAIT, MVT::Other,
+                         {Node->getOperand(1), Node->getOperand(0)});
+    return;
+  }
+  case ISD::UNSAFE_BEGIN: {
+    // SoundSpec begin: chain-carrying X86 pseudo, no data operands.
+    CurDAG->SelectNodeTo(Node, X86::UNSAFE_BEGIN, MVT::Other,
+                         {Node->getOperand(0)});
+    return;
+  }
+  case ISD::UNSAFE_END: {
+    // SoundSpec end: chain-carrying X86 pseudo, produces an i32 result
+    // in a GR32. Results are {i32, chain}; operand list is just {chain}.
+    CurDAG->SelectNodeTo(Node, X86::UNSAFE_END, MVT::i32, MVT::Other,
+                         {Node->getOperand(0)});
+    return;
+  }
+  case ISD::UNSAFE_SHADOW_EMBED: {
+    // For i32, lower to SOUNDSPEC_PROTECT_GPR (real x86 instruction
+    // `0F 25 11.data.dep`).
+    if (Node->getValueType(0) == MVT::i32) {
+      CurDAG->SelectNodeTo(Node, X86::SOUNDSPEC_PROTECT_GPR, MVT::i32,
+                           {Node->getOperand(0), Node->getOperand(1)});
+    } else {
+      // TODO: Add SOUNDSPEC_PROTECT_* variants for other register
+      // classes (GR64, XMM, YMM, ZMM, etc.). Falling back to the
+      // meta-pseudo placeholder which AsmPrinter strips — no
+      // protection instruction is emitted for this value type.
+      errs() << "warning: llvm.unsafe.shadow.embed: no "
+                "SOUNDSPEC_PROTECT_* X86 instruction yet for value type "
+             << Node->getValueType(0).getEVTString()
+             << "; lowering to no-op placeholder\n";
+      CurDAG->SelectNodeTo(Node, TargetOpcode::UNSAFE_SHADOW_EMBED,
+                           Node->getValueType(0),
+                           {Node->getOperand(0), Node->getOperand(1)});
+    }
+    return;
+  }
   case ISD::INTRINSIC_W_CHAIN: {
     unsigned IntNo = Node->getConstantOperandVal(1);
     switch (IntNo) {

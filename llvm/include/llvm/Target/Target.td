@@ -1535,32 +1535,6 @@ def UNSAFE_SHADOW_STORE : StandardPseudoInstruction {
   let hasSideEffects = true;
   let isMeta = true;
 }
-// Idempotent tie of gen and dep tokens. Two i32 register inputs, no def,
-// stripped at AsmPrinter like the other shadow.* meta pseudos.
-def UNSAFE_SHADOW_TIE : StandardPseudoInstruction {
-  let OutOperandList = (outs);
-  let InOperandList = (ins unknown:$gentok, unknown:$deptok);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
-// SoundSpec unsafe-scope begin/end markers. No data inputs, no defs
-// (begin) / one i32 def (end). Stripped at AsmPrinter like the other
-// meta pseudos.
-def UNSAFE_BEGIN : StandardPseudoInstruction {
-  let OutOperandList = (outs);
-  let InOperandList = (ins);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
-def UNSAFE_END : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
 
 def STACKMAP : StandardPseudoInstruction {
   let OutOperandList = (outs);

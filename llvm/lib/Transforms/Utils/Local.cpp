@@ -2962,16 +2962,25 @@ static void combineMetadata(Instruction *K, const Instruction *J,
       case LLVMContext::MD_unsafe_spec:
       case LLVMContext::MD_soundspec_store:
         break;
-      case LLVMContext::MD_soundspec_xmit:
-        // [soundspec] Union the operand lists of K and J. After
-        // idempotent CSE of `llvm.unsafe.shadow.xmit()`, the surviving
-        // xmit must cover every transmitter that linked to either
-        // original. For transmitter↔transmitter merges, the union of
-        // single-element MDs widens the surviving transmitter's link to
-        // both source IDs — still valid since each ID is satisfied by
-        // some xmit's tuple.
-        K->setMetadata(Kind, unsafe::concatMetadataNodes(KMD, JMD));
+      case LLVMContext::MD_soundspec_xmit: {
+        // [soundspec] Merge policy depends on whether K is an xmit
+        // call or a transmitter:
+        //
+        //   - xmit↔xmit (idempotent CSE collapse): union the operand
+        //     lists so the surviving xmit covers every transmitter
+        //     that linked to either original.
+        //
+        //   - transmitter↔transmitter (e.g. load CSE): keep K's MD
+        //     untouched. J's IDs die with J — no other instruction
+        //     references them. Concatting them onto K would smuggle
+        //     in IDs that aren't backed by any xmit (especially when
+        //     J was an unsafe transmitter whose !soundspec.xmit is
+        //     stale scaffolding), tripping the verifier.
+        using namespace llvm::PatternMatch;
+        if (match(K, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
+          K->setMetadata(Kind, unsafe::concatMetadataNodes(KMD, JMD));
         break;
+      }
       case LLVMContext::MD_dbg:
         llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");
       case LLVMContext::MD_DIAssignID:

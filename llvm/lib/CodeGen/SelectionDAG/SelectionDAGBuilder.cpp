@@ -7156,12 +7156,12 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     return;
   }
   case Intrinsic::unsafe_shadow_tie: {
-    // SoundSpec idempotent tie of gen and dep tokens. Chain-carrying.
-    // Operands: {chain, gentok, deptok}.
-    SDValue Gen = getValue(I.getArgOperand(0));
-    SDValue Dep = getValue(I.getArgOperand(1));
-    SDValue Node = DAG.getNode(ISD::UNSAFE_SHADOW_TIE, sdl, MVT::Other,
-                               getRoot(), Gen, Dep);
+    // SoundSpec: lower `tie(data, tok)` to UNSAFE_WAIT on the token only.
+    // The data operand is dropped at the SDAG layer — codegen only needs
+    // to materialize the wait against the token. Chain-carrying.
+    SDValue Tok = getValue(I.getArgOperand(1));
+    SDValue Node = DAG.getNode(ISD::UNSAFE_WAIT, sdl, MVT::Other,
+                               getRoot(), Tok);
     DAG.setRoot(Node);
     return;
   }

@@ -2535,6 +2535,7 @@ void X86AsmPrinter::emitInstruction(const MachineInstr *MI) {
   case X86::SOUNDSPEC_CFI_SRC:
     return LowerSOUNDSPEC_CFI_SRC(*MI);
 
+
   case X86::ASAN_CHECK_MEMACCESS:
     return LowerASAN_CHECK_MEMACCESS(*MI);
 

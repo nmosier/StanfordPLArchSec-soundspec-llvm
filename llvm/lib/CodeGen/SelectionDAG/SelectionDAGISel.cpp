@@ -2650,29 +2650,6 @@ void SelectionDAGISel::Select_UNSAFE_SHADOW_STORE(SDNode *N) {
                        {N->getOperand(1), N->getOperand(2), N->getOperand(0)});
 }
 
-void SelectionDAGISel::Select_UNSAFE_SHADOW_TIE(SDNode *N) {
-  // SoundSpec idempotent tie: chain-carrying pseudo with two i32 register
-  // uses (gen + dep). ISD operand order is {chain, gen, dep}; reorder to
-  // {gen, dep, chain} for the MachineSDNode so `InstrEmitter::countOperands`
-  // sees the chain at the tail.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_TIE,
-                       N->getValueType(0),
-                       {N->getOperand(1), N->getOperand(2), N->getOperand(0)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_BEGIN(SDNode *N) {
-  // SoundSpec unsafe-scope begin: chain-carrying pseudo, no data operands.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_BEGIN, N->getValueType(0),
-                       {N->getOperand(0)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_END(SDNode *N) {
-  // SoundSpec unsafe-scope end: chain-carrying pseudo, no data inputs,
-  // produces an i32 result. Results are {i32, chain}.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_END, N->getValueType(0),
-                       N->getValueType(1), {N->getOperand(0)});
-}
-
 void SelectionDAGISel::Select_UNSAFE_SHADOW_ARG(SDNode *N) {
   // SoundSpec shadow-token derived from an arbitrary-typed input. Single
   // operand passthrough; result is the fixed-type i32 shadow token. No
@@ -3490,20 +3467,8 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
   case ISD::UNSAFE_SHADOW_ARG:
     Select_UNSAFE_SHADOW_ARG(NodeToMatch);
     return;
-  case ISD::UNSAFE_SHADOW_EMBED:
-    Select_UNSAFE_SHADOW_EMBED(NodeToMatch);
-    return;
   case ISD::UNSAFE_SHADOW_STORE:
     Select_UNSAFE_SHADOW_STORE(NodeToMatch);
-    return;
-  case ISD::UNSAFE_SHADOW_TIE:
-    Select_UNSAFE_SHADOW_TIE(NodeToMatch);
-    return;
-  case ISD::UNSAFE_BEGIN:
-    Select_UNSAFE_BEGIN(NodeToMatch);
-    return;
-  case ISD::UNSAFE_END:
-    Select_UNSAFE_END(NodeToMatch);
     return;
   case ISD::STACKMAP:
     Select_STACKMAP(NodeToMatch);

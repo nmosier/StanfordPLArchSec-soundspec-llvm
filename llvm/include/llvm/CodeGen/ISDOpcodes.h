@@ -1477,10 +1477,10 @@ enum NodeType {
   /// UNSAFE_SHADOW_STORE: side-effecting shadow-memory store. Operand 0
   /// is the chain, operand 1 is the i32 shadow address, operand 2 is
   /// the i32 shadow data; single chain result.
-  /// UNSAFE_SHADOW_TIE: idempotent side-effecting tie of a shadow gen
-  /// token to a shadow dep token. Operand 0 is the chain, operand 1 is
-  /// the i32 gen token, operand 2 is the i32 dep token; single chain
-  /// result.
+  /// UNSAFE_WAIT: side-effecting wait on a shadow token. Lowered from
+  /// `llvm.unsafe.shadow.tie(data, tok)`; the data operand is dropped
+  /// at the SDAG layer. Operand 0 is the chain, operand 1 is the i32
+  /// token; single chain result.
   /// UNSAFE_BEGIN: marks beginning of unsafe scope. Operand 0 is chain;
   /// single chain result.
   /// UNSAFE_END: marks end of unsafe scope. Operand 0 is chain; results
@@ -1491,7 +1491,7 @@ enum NodeType {
   UNSAFE_SHADOW_ARG,
   UNSAFE_SHADOW_EMBED,
   UNSAFE_SHADOW_STORE,
-  UNSAFE_SHADOW_TIE,
+  UNSAFE_WAIT,
   UNSAFE_BEGIN,
   UNSAFE_END,
 
