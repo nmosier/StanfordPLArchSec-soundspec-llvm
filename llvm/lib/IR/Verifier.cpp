@@ -7813,6 +7813,17 @@ void Verifier::verifyUnsafeScope(const Function &F, Metadata *ID) {
 void Verifier::verifyUnsafeScopes(const Function &F) {
   using namespace llvm::PatternMatch;
 
+  bool Final = F.getMetadata("soundspec.final") != nullptr;
+
+  if (!Final) {
+    for (auto &I : instructions(F)) {
+      Check(!match(&I, m_Intrinsic<Intrinsic::unsafe_begin>()),
+            "Found @llvm.unsafe.begin() in non-final function!", &I);
+      Check(!match(&I, m_Intrinsic<Intrinsic::unsafe_end>()),
+            "Found @llvm.unsafe.end() in non-final function!", &I);
+    }
+  }
+
   // Make sure !unsafe metadata has the right shape.
   // We verify this even if !soundspec.verify isn't present.
   for (auto &I : instructions(F)) {
@@ -7871,42 +7882,46 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
 
   // Make sure that we don't have any bare transmitters,
   // speculation primitives, or calls.
-  for (auto *B : ReachableBlocks) {
-    for (auto &I : *B) {
-      auto *UnsafeMD = I.getMetadata(LLVMContext::MD_unsafe);
-      auto *SafeMD = I.getMetadata(LLVMContext::MD_safe);
-      auto *II = dyn_cast<IntrinsicInst>(&I);
+  if (!Final) {
+    for (auto *B : ReachableBlocks) {
+      for (auto &I : *B) {
+        auto *UnsafeMD = I.getMetadata(LLVMContext::MD_unsafe);
+        auto *SafeMD = I.getMetadata(LLVMContext::MD_safe);
+        auto *II = dyn_cast<IntrinsicInst>(&I);
 
-      if (isSpeculationPrimitive(I)) {
-        Check(UnsafeMD || SafeMD,
-              "speculation primitive missing !safe/!unsafe metadata!", &I);
-      }
+        if (isSpeculationPrimitive(I)) {
+          Check(UnsafeMD || SafeMD,
+                "speculation primitive missing !safe/!unsafe metadata!", &I);
+        }
 
-      if (isTransmitter(I) || unsafe::isRelevantCall(I)) {
-        Check(UnsafeMD || SafeMD,
-              "transmitter/call missing !safe/!unsafe metadata!", &I);
-      }
+        if (isTransmitter(I) || unsafe::isRelevantCall(I)) {
+          Check(UnsafeMD || SafeMD,
+                "transmitter/call missing !safe/!unsafe metadata!", &I);
+        }
 
-      // Make sure there is no empty !unsafe.
-      if (UnsafeMD) {
-        Check(UnsafeMD->getNumOperands(), "!unsafe shouldn't be empty", &I);
-      }
+        // Make sure there is no empty !unsafe.
+        if (UnsafeMD) {
+          Check(UnsafeMD->getNumOperands(), "!unsafe shouldn't be empty", &I);
+        }
 
-      // @llvm.unsafe.shadow.dep shouldn't have !unsafe/!safe metadata.
-      if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
-        Check(!UnsafeMD && !SafeMD,
-              "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata",
-              &I);
-      }
+        // @llvm.unsafe.shadow.dep shouldn't have !unsafe/!safe metadata.
+        if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
+          Check(!UnsafeMD && !SafeMD,
+                "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata",
+                &I);
+        }
 
-      // @llvm.unsafe.shadow.gen's metadata arg should match its !unsafe scope.
-      if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
-        Check(UnsafeMD, "@llvm.unsafe.shadow.gen should have !unsafe metadata",
-              &I);
-        auto *MV = cast<MetadataAsValue>(II->getArgOperand(0));
-        Check(MV->getMetadata() == UnsafeMD->getOperand(0),
-              "@llvm.unsafe.shadow.gen's metadata arg should match its !unsafe metadata",
-              II, UnsafeMD);
+        // @llvm.unsafe.shadow.gen's metadata arg should match its !unsafe
+        // scope.
+        if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
+          Check(UnsafeMD,
+                "@llvm.unsafe.shadow.gen should have !unsafe metadata", &I);
+          auto *MV = cast<MetadataAsValue>(II->getArgOperand(0));
+          Check(MV->getMetadata() == UnsafeMD->getOperand(0),
+                "@llvm.unsafe.shadow.gen's metadata arg should match its "
+                "!unsafe metadata",
+                II, UnsafeMD);
+        }
       }
     }
   }
@@ -7925,21 +7940,23 @@ void Verifier::verifyUnsafeScopes(const Function &F) {
   // transmitters the operand set is the concat of the originals'.
   // Verifier requirement: every operand of the transmitter's MD must
   // appear as an operand in some xmit's tuple.
-  SmallSet<Metadata *, 8> CoveredIDs;
-  for (auto *B : ReachableBlocks)
-    for (auto &I : *B)
-      if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
-        if (auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit))
+  if (!Final) {
+    SmallSet<Metadata *, 8> CoveredIDs;
+    for (auto *B : ReachableBlocks)
+      for (auto &I : *B)
+        if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
+          if (auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit))
+            for (auto &Op : MD->operands())
+              CoveredIDs.insert(Op.get());
+    for (auto *B : ReachableBlocks) {
+      for (auto &I : *B) {
+        if (isTransmitter(I) && I.getMetadata(LLVMContext::MD_safe)) {
+          auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit);
+          Check(MD, "!safe transmitters should have !soundspec.xmit", &I);
           for (auto &Op : MD->operands())
-            CoveredIDs.insert(Op.get());
-  for (auto *B : ReachableBlocks) {
-    for (auto &I : *B) {
-      if (isTransmitter(I) && I.getMetadata(LLVMContext::MD_safe)) {
-        auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit);
-        Check(MD, "!safe transmitters should have !soundspec.xmit", &I);
-        for (auto &Op : MD->operands())
-          Check(CoveredIDs.contains(Op.get()),
-                "no @llvm.unsafe.shadow.xmit() covers transmitter ID", &I);
+            Check(CoveredIDs.contains(Op.get()),
+                  "no @llvm.unsafe.shadow.xmit() covers transmitter ID", &I);
+        }
       }
     }
   }

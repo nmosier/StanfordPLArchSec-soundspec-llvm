@@ -232,6 +232,14 @@ STATISTIC(NumSinkCommonCode,
           "Number of common instruction 'blocks' sunk down to the end block");
 STATISTIC(NumSinkCommonInstrs,
           "Number of common instructions sunk down to the end block");
+STATISTIC(NumSoundSpecSinkBailed,
+          "[soundspec] common-instruction sinks skipped because at least "
+          "one instruction's !safe/!unsafe/!soundspec.* tag differs from "
+          "the survivor's (including absent-vs-present)");
+STATISTIC(NumSoundSpecHoistBailed,
+          "[soundspec] common-instruction hoists skipped because two "
+          "instructions' !safe/!unsafe/!soundspec.* tags differ "
+          "(including absent-vs-present)");
 STATISTIC(NumSpeculations, "Number of speculative executed instructions");
 STATISTIC(NumInvokes,
           "Number of invokes with empty resume blocks simplified into calls");
@@ -1685,6 +1693,24 @@ static void hoistLockstepIdenticalDbgVariableRecords(
   }
 }
 
+// [soundspec] Returns true iff `I1` and `I2` carry the same SoundSpec
+// scope/transmitter tags. Used to gate sinking/hoisting so the merged
+// survivor doesn't end up with one branch's scope ID or lose coverage
+// that the verifier requires on every transmitter.
+static bool haveMatchingSoundSpecTags(const Instruction *I1,
+                                      const Instruction *I2) {
+  static constexpr unsigned Kinds[] = {
+      LLVMContext::MD_safe,         LLVMContext::MD_unsafe,
+      LLVMContext::MD_unsafe_init,  LLVMContext::MD_unsafe_xmit,
+      LLVMContext::MD_unsafe_spec,  LLVMContext::MD_soundspec_store,
+      LLVMContext::MD_soundspec_xmit,
+  };
+  for (unsigned Kind : Kinds)
+    if (I1->getMetadata(Kind) != I2->getMetadata(Kind))
+      return false;
+  return true;
+}
+
 static bool areIdenticalUpToCommutativity(const Instruction *I1,
                                           const Instruction *I2) {
   if (I1->isIdenticalToWhenDefined(I2, /*IntersectAttrs=*/true))
@@ -1981,6 +2007,14 @@ bool SimplifyCFGOpt::hoistCommonCodeFromSuccessors(Instruction *TI,
       if (AllInstsAreIdentical && (!areIdenticalUpToCommutativity(I1, I2) ||
                                    MMRAMetadata(*I1) != MMRAMetadata(*I2)))
         AllInstsAreIdentical = false;
+      // [soundspec] If the instructions look identical but their
+      // SoundSpec tags differ, treat them as non-identical so the hoist
+      // doesn't drop or invent scope/transmitter coverage on the
+      // surviving instruction.
+      if (AllInstsAreIdentical && !haveMatchingSoundSpecTags(I1, I2)) {
+        ++NumSoundSpecHoistBailed;
+        AllInstsAreIdentical = false;
+      }
     }
 
     SmallVector<Instruction *, 8> OtherInsts;
@@ -2256,6 +2290,22 @@ static bool canSinkInstructions(
     // could drop a lot of MMRAs otherwise.
     if (MMRAMetadata(*I) != I0MMRA)
       return false;
+  }
+
+  // [soundspec] Refuse to sink if any instruction's SoundSpec tags differ
+  // from I0's. Sinking merges into a single survivor that inherits I0's
+  // metadata; if a sibling carried a different scope or transmitter ID
+  // (or one is tagged and the other is not), the merged instruction
+  // either drops valid scope info or fabricates coverage that doesn't
+  // hold across the original predecessors. The verifier requires every
+  // transmitter to carry !safe/!unsafe — any miss breaks it.
+  for (auto *I : Insts) {
+    if (I == I0)
+      continue;
+    if (!haveMatchingSoundSpecTags(I, I0)) {
+      ++NumSoundSpecSinkBailed;
+      return false;
+    }
   }
 
   // Uses must be consistent: If I0 is used in a phi node in the sink target,

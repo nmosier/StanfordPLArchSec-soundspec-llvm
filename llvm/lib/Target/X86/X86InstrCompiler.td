@@ -343,23 +343,25 @@ def UNSAFE_END : I<0x01, MRM0r, (outs GR32:$dst), (ins),
   let isCodeGenOnly = 1;
 }
 
-// SOUNDSPEC_PROTECT_GPR marks a GPR data value as data-dependent on a
-// dep token. Encoded as `0F 25 11.xxx.yyy` — TB prefix, opcode 0x25,
-// MRMSrcReg form. The reg field (xxx) carries the data GPR; the r/m
-// field (yyy) carries the dep GPR. Passthrough: $data is tied to
-// $dst so the data register is unchanged at the value level.
-// Maps to `llvm.unsafe.shadow.embed(data, tok)` for i32 values.
-// `0F 25` is historically MOV TR (removed in i486; #UD on modern x86);
-// `isCodeGenOnly = 1` is defensive.
-def SOUNDSPEC_PROTECT_GPR : I<0x25, MRMSrcReg, (outs GR32:$dst),
-                              (ins GR32:$data, GR32:$dep),
-                              "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
-                              []>, TB, Sched<[]> {
-  let Constraints = "$data = $dst";
-  let hasSideEffects = 1;
-  let mayLoad = 0;
-  let mayStore = 0;
-  let isCodeGenOnly = 1;
+// SOUNDSPEC_PROTECT_GR{32,64} mark a GPR data value as data-dependent on a
+// dep token. Encoded as `0F 25 11.xxx.yyy` (GR32) or `REX.W 0F 25 11.xxx.yyy`
+// (GR64) — TB prefix, opcode 0x25, MRMSrcReg form. The reg field (xxx)
+// carries the data GPR; the r/m field (yyy) carries the dep GPR. The data
+// register width selects between the 32-bit and 64-bit forms, mirroring
+// `mov eax, ebx` vs `mov rax, rbx`. Passthrough: $data is tied to $dst so
+// the data register is unchanged at the value level. Maps to
+// `llvm.unsafe.shadow.embed(data, tok)`. `0F 25` is historically MOV TR
+// (removed in i486; #UD on modern x86); `isCodeGenOnly = 1` is defensive.
+let Constraints = "$data = $dst", hasSideEffects = 1, mayLoad = 0,
+    mayStore = 0, isCodeGenOnly = 1 in {
+  def SOUNDSPEC_PROTECT_GR32 : I<0x25, MRMSrcReg, (outs GR32:$dst),
+                                 (ins GR32:$data, GR32:$dep),
+                                 "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
+                                 []>, TB, Sched<[]>;
+  def SOUNDSPEC_PROTECT_GR64 : RI<0x25, MRMSrcReg, (outs GR64:$dst),
+                                  (ins GR64:$data, GR64:$dep),
+                                  "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
+                                  []>, TB, Sched<[]>;
 }
 
 //===----------------------------------------------------------------------===//

@@ -700,6 +700,7 @@ unsafe::InliningCookie unsafe::prepareCallSiteForInlining(CallBase &C) {
 
 void unsafe::postProcessInlinedBlocks(iterator_range<Function::iterator> Blocks,
                                       InliningCookie Info) {
+  using namespace llvm::PatternMatch;
   assert(!Blocks.empty());
   auto &F = *Blocks.begin()->getParent();
   auto &Ctx = F.getContext();
@@ -731,6 +732,13 @@ void unsafe::postProcessInlinedBlocks(iterator_range<Function::iterator> Blocks,
       NewID = createNewScope(Ctx);
     return NewID;
   };
+  SmallDenseMap<Metadata *, Metadata *> RemapXmits;
+  auto GetNewXmit = [&](Metadata *OldID) {
+    auto &NewID = RemapXmits[OldID];
+    if (!NewID)
+      NewID = createNewXmit(Ctx);
+    return NewID;
+  };
   // TODO: Would be nice to refactor with replacement function.
   for (auto &B : Blocks)
     for (auto &I : B) {
@@ -747,6 +755,26 @@ void unsafe::postProcessInlinedBlocks(iterator_range<Function::iterator> Blocks,
         auto *NewID = GetNewID(OldID);
         auto *NewArg = MetadataAsValue::get(Ctx, NewID);
         II->setArgOperand(0, NewArg);
+      }
+
+      if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>())) {
+        // xmit intrinsic: MD_soundspec_xmit is a *tuple* of distinct
+        // self-referencing xmit IDs. Remap each operand through
+        // GetNewXmit and re-wrap as a tuple via createNewXmitSet.
+        if (auto *OrigIDs = I.getMetadata(LLVMContext::MD_soundspec_xmit)) {
+          SmallVector<Metadata *> NewIDVec;
+          transform(OrigIDs->operands(), std::back_inserter(NewIDVec),
+                    GetNewXmit);
+          I.setMetadata(LLVMContext::MD_soundspec_xmit,
+                        createNewXmitSet(Ctx, NewIDVec));
+        }
+      } else if (auto *OrigID = I.getMetadata(LLVMContext::MD_soundspec_xmit)) {
+        // Transmitter: MD_soundspec_xmit is the single self-referencing
+        // xmit ID directly (verifier invariant:
+        // XmitID->getOperand(0) == XmitID). Remap and stamp it without
+        // wrapping in an outer tuple.
+        I.setMetadata(LLVMContext::MD_soundspec_xmit,
+                      cast<MDNode>(GetNewXmit(OrigID)));
       }
     }
 }

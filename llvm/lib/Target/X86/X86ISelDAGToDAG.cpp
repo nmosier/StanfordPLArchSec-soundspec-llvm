@@ -5197,14 +5197,35 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
     return;
   }
   case ISD::UNSAFE_SHADOW_EMBED: {
-    // For i32, lower to SOUNDSPEC_PROTECT_GPR (real x86 instruction
-    // `0F 25 11.data.dep`).
-    if (Node->getValueType(0) == MVT::i32) {
-      CurDAG->SelectNodeTo(Node, X86::SOUNDSPEC_PROTECT_GPR, MVT::i32,
-                           {Node->getOperand(0), Node->getOperand(1)});
-    } else {
+    // Lower to a width-specific SOUNDSPEC_PROTECT_GR{32,64} instruction
+    // (real x86 `0F 25 11.data.dep`, REX.W for 64-bit) when the data type
+    // is a 32- or 64-bit GPR. Mirrors `mov eax, ebx` vs `mov rax, rbx`.
+    MVT VT = Node->getValueType(0).getSimpleVT();
+    SDLoc DL(Node);
+    SDValue Data = Node->getOperand(0);
+    SDValue Dep = Node->getOperand(1);
+    unsigned Opc;
+    switch (VT.SimpleTy) {
+    case MVT::i32:
+      Opc = X86::SOUNDSPEC_PROTECT_GR32;
+      break;
+    case MVT::i64:
+      Opc = X86::SOUNDSPEC_PROTECT_GR64;
+      // The shadow dep is always i32, but REX.W on 0F 25 makes both reg
+      // fields 64-bit. Widen the dep to GR64 (low 32 = dep, high 32 = 0)
+      // via SUBREG_TO_REG. Sound on x86: every 32-bit GPR write
+      // zero-extends to the parent 64-bit register, so the dep's
+      // underlying physreg always has zero in the upper half.
+      Dep = SDValue(CurDAG->getMachineNode(
+                        TargetOpcode::SUBREG_TO_REG, DL, MVT::i64,
+                        CurDAG->getTargetConstant(0, DL, MVT::i64), Dep,
+                        CurDAG->getTargetConstant(X86::sub_32bit, DL,
+                                                  MVT::i32)),
+                    0);
+      break;
+    default:
       // TODO: Add SOUNDSPEC_PROTECT_* variants for other register
-      // classes (GR64, XMM, YMM, ZMM, etc.). Falling back to the
+      // classes (XMM, YMM, ZMM, GR8/16, etc.). Falling back to the
       // meta-pseudo placeholder which AsmPrinter strips — no
       // protection instruction is emitted for this value type.
       errs() << "warning: llvm.unsafe.shadow.embed: no "
@@ -5212,9 +5233,10 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
              << Node->getValueType(0).getEVTString()
              << "; lowering to no-op placeholder\n";
       CurDAG->SelectNodeTo(Node, TargetOpcode::UNSAFE_SHADOW_EMBED,
-                           Node->getValueType(0),
-                           {Node->getOperand(0), Node->getOperand(1)});
+                           Node->getValueType(0), {Data, Dep});
+      return;
     }
+    CurDAG->SelectNodeTo(Node, Opc, VT, {Data, Dep});
     return;
   }
   case ISD::INTRINSIC_W_CHAIN: {

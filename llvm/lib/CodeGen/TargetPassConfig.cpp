@@ -981,6 +981,13 @@ void TargetPassConfig::addISelPrepare() {
 
   addPass(createCallBrPass());
 
+  // SoundSpec cleanup. Runs before SafeStack/StackProtector so subsequent
+  // codegen-pipeline passes see the lowered shape (with @llvm.unsafe.begin/end
+  // markers and shadow embeds) rather than the high-level SoundSpec
+  // metadata + intrinsic form. Only functions touched by SoundSpec are
+  // modified.
+  addPass(createSoundSpecCleanupLegacyPass());
+
   // Add both the safe stack and the stack protection passes: each of them will
   // only protect functions that have corresponding attributes.
   addPass(createSafeStackPass());

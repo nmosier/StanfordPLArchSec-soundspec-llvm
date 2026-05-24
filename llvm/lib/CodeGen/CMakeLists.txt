@@ -223,6 +223,7 @@ add_llvm_component_library(LLVMCodeGen
   ShrinkWrap.cpp
   SjLjEHPrepare.cpp
   SlotIndexes.cpp
+  SoundSpecCleanup.cpp
   SpillPlacement.cpp
   SplitKit.cpp
   StackColoring.cpp

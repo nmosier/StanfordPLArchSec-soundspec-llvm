@@ -7174,6 +7174,17 @@ bool llvm::isSafeToSpeculativelyExecuteWithOpcode(
       return false;
     const Function *Callee = CI->getCalledFunction();
 
+    // [soundspec] Intrinsics that explicitly opt in via IntrSpeculatable
+    // are always safe to speculate, even if they are nominally
+    // side-effecting (e.g. write to inaccessible memory). The attribute
+    // is a hard contract from the intrinsic author that the call has no
+    // observable effect in a context where the source program would not
+    // have executed it. SoundSpec marker intrinsics (shadow.xmit etc.)
+    // rely on this so hoisters/sinkers/PRE will move them freely along
+    // with the transmitters they cover.
+    if (Callee && Callee->isIntrinsic() && Callee->isSpeculatable())
+      return true;
+
     // The called function could have undefined behavior or side-effects, even
     // if marked readnone nounwind.
     if (!Callee || !Callee->isSpeculatable())
