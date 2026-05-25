@@ -335,12 +335,12 @@ bool unsafe::isRelevantCall(const Instruction &I) {
   case Intrinsic::unsafe_shadow_arg:
   case Intrinsic::unsafe_shadow_embed:
   case Intrinsic::unsafe_shadow_store:
-  case Intrinsic::unsafe_shadow_tie:
   case Intrinsic::unsafe_begin:
   case Intrinsic::unsafe_end:
     return false;
     // We should mark llvm.unsafe.shadow.gen with the !unsafe scope it belongs to.
   case Intrinsic::unsafe_shadow_gen:
+  case Intrinsic::unsafe_shadow_tie:
     return true;
   }
   if (!II->mayHaveSideEffects() && !II->mayReadOrWriteMemory())
@@ -548,8 +548,7 @@ static Instruction *promoteSafeCallToUnsafeFnToUnsafeCall(CallBase &C) {
     
     ArgI->replaceAllUsesWith(OrigArg);
     ArgI->eraseFromParent();
-    IRBuilder<> IRB(&C);
-    IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_tie, {Gen, Dep});
+    unsafe::createShadowTie(&C, Gen, Dep, IDs);
   }
 
   // Replace uses of any trailing !@*.arg with Gen,.
@@ -618,11 +617,25 @@ Instruction *unsafe::normalizeCallSiteBeforeInliningIntoSafeFn(CallBase &C) {
   return createGenIntrinsic(IRB, ID);
 }
 
-void unsafe::tieLoadResult(Instruction &I, Value *Gen) {
+CallInst *unsafe::createShadowTie(IRBuilderBase &IRB, Value *Gen, Value *Dep,
+                                 MDNode *UnsafeIDs) {
+  assert(UnsafeIDs && "UnsafeIDs was null!");
+  auto *Tie = IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_tie, {Gen, Dep});
+  Tie->setMetadata(LLVMContext::MD_unsafe, UnsafeIDs);
+  return Tie;
+}
+
+CallInst *unsafe::createShadowTie(Instruction *At, Value *Gen, Value *Dep,
+                                 MDNode *UnsafeIDs) {
+  IRBuilder<> IRB(At);
+  return createShadowTie(IRB, Gen, Dep, UnsafeIDs);
+}
+
+void unsafe::tieLoadResult(Instruction &I, Value *Gen, MDNode *UnsafeIDs) {
   assert(isa<LoadInst>(&I));
   IRBuilder<> IRB(I.getNextNode());
   auto *Dep = IRB.CreateUnaryIntrinsic(Intrinsic::unsafe_shadow_arg, &I);
-  IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_tie, {Gen, Dep});
+  createShadowTie(IRB, Gen, Dep, UnsafeIDs);
 }
 
 /// Returns whether the instruction was erased.
@@ -676,7 +689,7 @@ static void postProcessInstructionInlinedFromUnsafeCall(Instruction &I,
 
   // Extract and tag load dependencies.
   if (isa<LoadInst>(&I))
-    unsafe::tieLoadResult(I, Gen);
+    unsafe::tieLoadResult(I, Gen, IDs);
 }
 
 unsafe::InliningCookie unsafe::prepareCallSiteForInlining(CallBase &C) {
