@@ -3386,12 +3386,15 @@ private:
     LoadInst *Load = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
                                            NewAI.getAlign(), "load");
 
-    // [soundspec] Propagate !safe + !unsafe.xmit from the original load
-    // onto the split version.
+    // [soundspec] Propagate !safe + !unsafe.xmit + !soundspec.xmit
+    // from the original load onto the split version. !soundspec.xmit
+    // is required so the verifier's "!safe transmitters should have
+    // !soundspec.xmit" check passes on the rewritten load.
     Load->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
                             LLVMContext::MD_access_group,
                             LLVMContext::MD_safe,
-                            LLVMContext::MD_unsafe_xmit});
+                            LLVMContext::MD_unsafe_xmit,
+                            LLVMContext::MD_soundspec_xmit});
     return extractVector(IRB, Load, BeginIndex, EndIndex, "vec");
   }
 
@@ -3493,13 +3496,17 @@ private:
 
       if (LI.isVolatile())
         NewLI->setAtomic(LI.getOrdering(), LI.getSyncScopeID());
-      // [soundspec] include MD_safe + MD_unsafe + MD_unsafe_xmit so the
-      // new load inherits the original load's scope tags.
+      // [soundspec] include MD_safe + MD_unsafe + MD_unsafe_xmit +
+      // MD_soundspec_xmit so the new load inherits the original
+      // load's scope tags. !soundspec.xmit is required to keep the
+      // verifier's transmitter-coverage check satisfied after the
+      // load is split.
       NewLI->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
                                LLVMContext::MD_access_group,
                                LLVMContext::MD_safe,
                                LLVMContext::MD_unsafe,
-                               LLVMContext::MD_unsafe_xmit});
+                               LLVMContext::MD_unsafe_xmit,
+                               LLVMContext::MD_soundspec_xmit});
 
       V = NewLI;
       IsPtrAdjusted = true;
