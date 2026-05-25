@@ -476,9 +476,7 @@ private:
   void Select_UNSAFE_OUT(SDNode *N);
   void Select_UNSAFE_DEP(SDNode *N);
   void Select_UNSAFE_SHADOW_GEN(SDNode *N);
-  void Select_UNSAFE_SHADOW_DEP(SDNode *N);
   void Select_UNSAFE_SHADOW_XMIT(SDNode *N);
-  void Select_UNSAFE_SHADOW_ARG(SDNode *N);
   void Select_UNSAFE_SHADOW_EMBED(SDNode *N);
   void Select_UNSAFE_SHADOW_STORE(SDNode *N);
 
