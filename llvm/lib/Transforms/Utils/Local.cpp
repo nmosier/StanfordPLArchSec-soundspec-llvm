@@ -3208,6 +3208,19 @@ void llvm::copyMetadataForLoad(LoadInst &Dest, const LoadInst &Source) {
       break;
     }
 
+    // [soundspec] Per-transmitter xmit-ID tag — must travel with the
+    // load so the verifier's "!safe transmitters should have
+    // !soundspec.xmit" check still passes after a retype. Same shape
+    // as MD_safe/MD_unsafe above.
+    case LLVMContext::MD_soundspec_xmit: {
+      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_soundspec_xmit);
+      (void)DestMD;
+      assert(!(DestMD && DestMD != N) &&
+             "Dest already has a !soundspec.xmit tag!");
+      Dest.setMetadata(ID, N);
+      break;
+    }
+
     case LLVMContext::MD_nonnull:
       copyNonnullMetadata(Source, N, Dest);
       break;
