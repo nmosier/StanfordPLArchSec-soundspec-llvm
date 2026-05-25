@@ -77,6 +77,9 @@ MDNode *createNewXmitSet(LLVMContext &Ctx, ArrayRef<Metadata *> Xmits);
 
 MDNode *concatMetadataNodes(MDNode *A, MDNode *B);
 
+CallInst *createShadowTie(Instruction *At, Value *Gen, Value *Dep, MDNode *UnsafeIDs);
+CallInst *createShadowTie(IRBuilderBase &IRB, Value *Gen, Value *Dep, MDNode *UnsafeIDs);
+
 struct InliningCookie {
   /// The call's !unsafe scope ID, if any.
   /// nullptr = the call was safe.
@@ -95,7 +98,7 @@ Instruction *normalizeCallSiteBeforeInliningIntoSafeFn(CallBase &C);
 /// IDs should be the !unsafe scope set on the call.
 void postProcessBlockInlinedFromUnsafeCall(BasicBlock &B, MDNode *IDs, Instruction *Gen);
 
-void tieLoadResult(Instruction &I, Value *Gen);
+void tieLoadResult(Instruction &I, Value *Gen, MDNode *UnsafeIDs);
 
 bool isValidScope(Metadata *ID);
 
