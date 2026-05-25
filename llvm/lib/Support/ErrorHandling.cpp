@@ -131,7 +131,7 @@ void llvm::report_fatal_error(const Twine &Reason, bool GenCrashDiag) {
   // files registered with RemoveFileOnSignal.
   sys::RunInterruptHandlers();
 
-  if (GenCrashDiag)
+  if (GenCrashDiag || true)
     abort();
   else
     exit(1);
