@@ -1489,29 +1489,11 @@ def UNSAFE_SHADOW_GEN : StandardPseudoInstruction {
   let hasSideEffects = true;
   let isMeta = true;
 }
-def UNSAFE_SHADOW_DEP : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$x, unknown:$y);
-  let AsmString = "";
-  let hasSideEffects = false;
-  let Constraints = "$x = $dst";
-  let isMeta = true;
-}
 def UNSAFE_SHADOW_XMIT : StandardPseudoInstruction {
   let OutOperandList = (outs);
   let InOperandList = (ins unknown:$x);
   let AsmString = "";
   let hasSideEffects = true;
-  let isMeta = true;
-}
-// Polymorphic input ($arg, any type) → i32 $dst. No `$arg = $dst` tie:
-// the operand sizes can differ, and the entire shadow chain is
-// `isMeta`-stripped at AsmPrinter so the dst register is never observed.
-def UNSAFE_SHADOW_ARG : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$arg);
-  let AsmString = "";
-  let hasSideEffects = false;
   let isMeta = true;
 }
 // Polymorphic passthrough: $val (any type) gets returned as $dst (same
