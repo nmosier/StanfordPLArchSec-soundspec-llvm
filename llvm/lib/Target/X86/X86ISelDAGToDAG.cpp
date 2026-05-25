@@ -5206,6 +5206,8 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
     SDValue Dep = Node->getOperand(1);
     unsigned Opc;
     switch (VT.SimpleTy) {
+#if 0
+      #warning "fixme"
     case MVT::i32:
       Opc = X86::SOUNDSPEC_PROTECT_GR32;
       break;
@@ -5223,21 +5225,80 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
                                                   MVT::i32)),
                     0);
       break;
+      #endif
     default:
       // TODO: Add SOUNDSPEC_PROTECT_* variants for other register
-      // classes (XMM, YMM, ZMM, GR8/16, etc.). Falling back to the
-      // meta-pseudo placeholder which AsmPrinter strips — no
-      // protection instruction is emitted for this value type.
-      errs() << "warning: llvm.unsafe.shadow.embed: no "
-                "SOUNDSPEC_PROTECT_* X86 instruction yet for value type "
-             << Node->getValueType(0).getEVTString()
-             << "; lowering to no-op placeholder\n";
-      CurDAG->SelectNodeTo(Node, TargetOpcode::UNSAFE_SHADOW_EMBED,
-                           Node->getValueType(0), {Data, Dep});
+      // classes (XMM, YMM, ZMM, GR8/16, etc.). Fail-safe fallback:
+      // emit an LFENCE on the current DAG root chain so subsequent
+      // speculative loads in the function are serialized, then pass
+      // the data operand through unchanged. LFENCE position is
+      // imprecise (anchored on the root, not the embed's logical
+      // location), but guarantees *some* speculation barrier rather
+      // than silently dropping protection.
+      {
+        SDValue OldRoot = CurDAG->getRoot();
+        SDValue NewRoot(CurDAG->getMachineNode(X86::LFENCE, DL, MVT::Other,
+                                               OldRoot),
+                        0);
+        CurDAG->setRoot(NewRoot);
+      }
+      CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), Data);
+      CurDAG->RemoveDeadNode(Node);
       return;
     }
     CurDAG->SelectNodeTo(Node, Opc, VT, {Data, Dep});
     return;
+  }
+  case ISD::UNSAFE_SHADOW_ARG: {
+    // Lower to a width-specific UNSAFE_ARG_GR{32,64} instruction (real
+    // x86 `0F 1D 11.ddd.sss`, REX.W for 64-bit). The SDAG node always
+    // produces an i32 shadow result. For an i64 source, the X86
+    // instruction produces a GR64 result and we extract the low
+    // sub_32bit to satisfy the SDAG i32 type.
+    SDLoc DL(Node);
+    SDValue Src = Node->getOperand(0);
+    MVT SrcVT = Src.getValueType().getSimpleVT();
+    switch (SrcVT.SimpleTy) {
+    case MVT::i32: {
+      CurDAG->SelectNodeTo(Node, X86::UNSAFE_ARG_GR32, MVT::i32, Src);
+      return;
+    }
+    case MVT::i64: {
+      SDValue GR64(CurDAG->getMachineNode(X86::UNSAFE_ARG_GR64, DL,
+                                          MVT::i64, Src),
+                   0);
+      SDValue I32 = CurDAG->getTargetExtractSubreg(X86::sub_32bit, DL,
+                                                   MVT::i32, GR64);
+      CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), I32);
+      CurDAG->RemoveDeadNode(Node);
+      return;
+    }
+    default:
+      // TODO: Add UNSAFE_ARG_* variants for other register classes
+      // (XMM, YMM, ZMM, GR8/16, etc.). Fail-safe fallback: emit an
+      // LFENCE on the DAG root chain so subsequent speculative loads
+      // are serialized, then replace the shadow result with constant
+      // 0 (any downstream consumer just sees a zero dep token; LFENCE
+      // is the real protection).
+      {
+        SDValue OldRoot = CurDAG->getRoot();
+        SDValue NewRoot(CurDAG->getMachineNode(X86::LFENCE, DL, MVT::Other,
+                                               OldRoot),
+                        0);
+        CurDAG->setRoot(NewRoot);
+      }
+      // MOV32ri (not raw ISD::Constant) is required so the downstream
+      // ISD::OR (from llvm.unsafe.shadow.dep) sees a register operand
+      // instead of a raw Constant — otherwise ISel matches OR32rr
+      // with `Imm:0, Imm:0` and asserts in MC encode.
+      SDValue ZeroReg(
+          CurDAG->getMachineNode(X86::MOV32ri, DL, MVT::i32,
+                                 CurDAG->getTargetConstant(0, DL, MVT::i32)),
+          0);
+      CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), ZeroReg);
+      CurDAG->RemoveDeadNode(Node);
+      return;
+    }
   }
   case ISD::INTRINSIC_W_CHAIN: {
     unsigned IntNo = Node->getConstantOperandVal(1);

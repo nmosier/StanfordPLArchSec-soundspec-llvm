@@ -304,64 +304,76 @@ def SOUNDSPEC_CFI_SRC : PseudoI<
   let mayStore = 0;
 }
 
-// UNSAFE_WAIT is the SoundSpec wait-on-token marker. Encoded as
-//   0F 01 (D8+r)
-// which overlaps the AMD SVM instruction range (VMRUN, VMMCALL, etc.).
-// `isCodeGenOnly = 1` keeps this out of the disassembler / asm parser
-// tables so it doesn't conflict with those; the MC encoder still
-// emits the raw bytes. SoundSpec target silicon repurposes this
-// encoding.
-def UNSAFE_WAIT : I<0x01, MRM3r, (outs), (ins GR32:$tok),
-                    "unsafe_wait\t$tok", []>, TB,
-                  Sched<[]> {
-  let hasSideEffects = 1;
-  let mayLoad = 0;
-  let mayStore = 0;
-  let isCodeGenOnly = 1;
-}
-
-// UNSAFE_BEGIN marks the start of a SoundSpec unsafe scope. Encoded
-// as `0F 24` (no ModR/M, no operand). The 0F 24 byte sequence is
-// unused on modern x86; SoundSpec target silicon repurposes it.
-def UNSAFE_BEGIN : I<0x24, RawFrm, (outs), (ins),
+// UNSAFE_{BEGIN,END,WAIT} share a SoundSpec sub-table at TB opcode 0x19,
+// distinguished by the reg field of a mod=11 ModR/M byte:
+//
+//   /0  ->  UNSAFE_BEGIN              0F 19 C0           (no operands)
+//   /1  ->  UNSAFE_END    $dst        0F 19 11.001.ddd   (ddd = $dst i32)
+//   /2  ->  UNSAFE_WAIT   $tok        0F 19 11.010.sss   (sss = $tok i32)
+//
+// `0F 19` (along with 0F 1A–0F 1F) sits in the multi-byte-NOP/PREFETCH
+// reserved-hint region. Mod=11 forms of these are #UD on current x86,
+// so SoundSpec silicon can repurpose them. We *do* expose these to the
+// disassembler/asm-parser so `llvm-objdump` / `lldb` render SoundSpec
+// instructions with their real mnemonics instead of as generic NOPs.
+def UNSAFE_BEGIN : I<0x19, MRM_C0, (outs), (ins),
                      "unsafe_begin", []>, TB, Sched<[]> {
   let hasSideEffects = 1;
   let mayLoad = 0;
   let mayStore = 0;
-  let isCodeGenOnly = 1;
 }
-
-// UNSAFE_END marks the end of a SoundSpec unsafe scope and produces
-// an i32 result. Encoded as `0F 01 (C0+r)` where r is the destination
-// register. This collides with VMCALL/VMLAUNCH/etc. on standard x86;
-// `isCodeGenOnly = 1` keeps it out of the disassembler.
-def UNSAFE_END : I<0x01, MRM0r, (outs GR32:$dst), (ins),
+def UNSAFE_END : I<0x19, MRM1r, (outs GR32:$dst), (ins),
                    "unsafe_end\t$dst", []>, TB, Sched<[]> {
   let hasSideEffects = 1;
   let mayLoad = 0;
   let mayStore = 0;
-  let isCodeGenOnly = 1;
+}
+def UNSAFE_WAIT : I<0x19, MRM2r, (outs), (ins GR32:$tok),
+                    "unsafe_wait\t$tok", []>, TB, Sched<[]> {
+  let hasSideEffects = 1;
+  let mayLoad = 0;
+  let mayStore = 0;
 }
 
-// SOUNDSPEC_PROTECT_GR{32,64} mark a GPR data value as data-dependent on a
-// dep token. Encoded as `0F 25 11.xxx.yyy` (GR32) or `REX.W 0F 25 11.xxx.yyy`
-// (GR64) — TB prefix, opcode 0x25, MRMSrcReg form. The reg field (xxx)
-// carries the data GPR; the r/m field (yyy) carries the dep GPR. The data
-// register width selects between the 32-bit and 64-bit forms, mirroring
-// `mov eax, ebx` vs `mov rax, rbx`. Passthrough: $data is tied to $dst so
-// the data register is unchanged at the value level. Maps to
-// `llvm.unsafe.shadow.embed(data, tok)`. `0F 25` is historically MOV TR
-// (removed in i486; #UD on modern x86); `isCodeGenOnly = 1` is defensive.
+// SOUNDSPEC_PROTECT_GR{32,64} mark a GPR data value as data-dependent on
+// a dep token. Encoded as `0F 1E 11.ddd.sss` (GR32) or
+// `REX.W 0F 1E 11.ddd.sss` (GR64) — TB prefix, opcode 0x1E, MRMSrcReg
+// form. The reg field (ddd) carries the data/dst GPR; the r/m field
+// (sss) carries the dep GPR. The data register width selects between
+// the 32-bit and 64-bit forms, mirroring `mov eax, ebx` vs `mov rax,
+// rbx`. Passthrough: $data is tied to $dst so the data register is
+// unchanged at the value level. Maps to
+// `llvm.unsafe.shadow.embed(data, tok)`. `0F 1E` is reserved-NOP space
+// on modern x86; exposed to the disassembler/asm-parser so SoundSpec
+// instructions render with their real mnemonics.
 let Constraints = "$data = $dst", hasSideEffects = 1, mayLoad = 0,
-    mayStore = 0, isCodeGenOnly = 1 in {
-  def SOUNDSPEC_PROTECT_GR32 : I<0x25, MRMSrcReg, (outs GR32:$dst),
+    mayStore = 0 in {
+  def SOUNDSPEC_PROTECT_GR32 : I<0x1E, MRMSrcReg, (outs GR32:$dst),
                                  (ins GR32:$data, GR32:$dep),
                                  "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
                                  []>, TB, Sched<[]>;
-  def SOUNDSPEC_PROTECT_GR64 : RI<0x25, MRMSrcReg, (outs GR64:$dst),
+  def SOUNDSPEC_PROTECT_GR64 : RI<0x1E, MRMSrcReg, (outs GR64:$dst),
                                   (ins GR64:$data, GR64:$dep),
                                   "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
                                   []>, TB, Sched<[]>;
+}
+
+// UNSAFE_ARG_GR{32,64} produce the SoundSpec shadow token derived from a
+// GPR input. Encoded as `0F 1D 11.ddd.sss` (GR32) or
+// `REX.W 0F 1D 11.ddd.sss` (GR64) — TB prefix, opcode 0x1D, MRMSrcReg form.
+// The reg field (ddd) carries the destination GPR; the r/m field (sss)
+// carries the source GPR. Width selects between the 32-bit and 64-bit
+// forms, mirroring `mov eax, ebx` vs `mov rax, rbx`. Maps to
+// `llvm.unsafe.shadow.arg(value)`. `0F 1D` is reserved-NOP territory on
+// modern x86; exposed to the disassembler/asm-parser so SoundSpec
+// instructions render with their real mnemonics.
+let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in {
+  def UNSAFE_ARG_GR32 : I<0x1D, MRMSrcReg, (outs GR32:$dst), (ins GR32:$src),
+                          "unsafe_arg\t{$src, $dst|$dst, $src}",
+                          []>, TB, Sched<[]>;
+  def UNSAFE_ARG_GR64 : RI<0x1D, MRMSrcReg, (outs GR64:$dst), (ins GR64:$src),
+                           "unsafe_arg\t{$src, $dst|$dst, $src}",
+                           []>, TB, Sched<[]>;
 }
 
 //===----------------------------------------------------------------------===//
