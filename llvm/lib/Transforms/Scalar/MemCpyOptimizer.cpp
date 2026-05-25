@@ -846,6 +846,16 @@ bool MemCpyOptPass::processStore(StoreInst *SI, BasicBlock::iterator &BBI) {
   auto *M = Builder.CreateMemSet(SI->getPointerOperand(), ByteVal, Size,
                                  SI->getAlign());
   M->copyMetadata(*SI, LLVMContext::MD_DIAssignID);
+  // [soundspec] The memset replaces SI (SI is erased below), so carry
+  // its scope/transmitter metadata over — verifier requires every
+  // speculation-primitive call to be tagged.
+  M->copyMetadata(*SI, {LLVMContext::MD_safe,
+                        LLVMContext::MD_unsafe,
+                        LLVMContext::MD_unsafe_init,
+                        LLVMContext::MD_unsafe_xmit,
+                        LLVMContext::MD_unsafe_spec,
+                        LLVMContext::MD_soundspec_store,
+                        LLVMContext::MD_soundspec_xmit});
 
   LLVM_DEBUG(dbgs() << "Promoting " << *SI << " to " << *M << "\n");
 
@@ -1298,10 +1308,13 @@ bool MemCpyOptPass::processMemCpyMemCpyDependence(MemCpyInst *M,
 
   NewM->copyMetadata(*M, LLVMContext::MD_DIAssignID);
   // [soundspec] The forwarded memcpy/memmove replaces M; carry its scope.
-  if (MDNode *MD = M->getMetadata(LLVMContext::MD_safe))
-    NewM->setMetadata(LLVMContext::MD_safe, MD);
-  if (MDNode *MD = M->getMetadata(LLVMContext::MD_unsafe))
-    NewM->setMetadata(LLVMContext::MD_unsafe, MD);
+  NewM->copyMetadata(*M, {LLVMContext::MD_safe,
+                          LLVMContext::MD_unsafe,
+                          LLVMContext::MD_unsafe_init,
+                          LLVMContext::MD_unsafe_xmit,
+                          LLVMContext::MD_unsafe_spec,
+                          LLVMContext::MD_soundspec_store,
+                          LLVMContext::MD_soundspec_xmit});
 
   assert(isa<MemoryDef>(MSSA->getMemoryAccess(M)));
   auto *LastDef = cast<MemoryDef>(MSSA->getMemoryAccess(M));
@@ -1417,6 +1430,16 @@ bool MemCpyOptPass::processMemSetMemCpyDependence(MemCpyInst *MemCpy,
   Instruction *NewMemSet =
       Builder.CreateMemSet(Builder.CreatePtrAdd(Dest, SrcSize),
                            MemSet->getOperand(1), MemsetLen, Alignment);
+  // [soundspec] The new (smaller) memset replaces the old MemSet
+  // semantically (the old one is erased below). Inherit its scope and
+  // transmitter tags so the verifier doesn't trip.
+  NewMemSet->copyMetadata(*MemSet, {LLVMContext::MD_safe,
+                                    LLVMContext::MD_unsafe,
+                                    LLVMContext::MD_unsafe_init,
+                                    LLVMContext::MD_unsafe_xmit,
+                                    LLVMContext::MD_unsafe_spec,
+                                    LLVMContext::MD_soundspec_store,
+                                    LLVMContext::MD_soundspec_xmit});
 
   assert(isa<MemoryDef>(MSSA->getMemoryAccess(MemCpy)) &&
          "MemCpy must be a MemoryDef");
@@ -1530,8 +1553,11 @@ bool MemCpyOptPass::performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
   // scope tag.
   NewM->copyMetadata(*MemSet, {LLVMContext::MD_safe,
                                LLVMContext::MD_unsafe,
+                               LLVMContext::MD_unsafe_init,
                                LLVMContext::MD_unsafe_xmit,
-                               LLVMContext::MD_unsafe_spec});
+                               LLVMContext::MD_unsafe_spec,
+                               LLVMContext::MD_soundspec_store,
+                               LLVMContext::MD_soundspec_xmit});
   auto *LastDef = cast<MemoryDef>(MSSA->getMemoryAccess(MemCpy));
   auto *NewAccess = MSSAU->createMemoryAccessAfter(NewM, nullptr, LastDef);
   MSSAU->insertDef(cast<MemoryDef>(NewAccess), /*RenameUses=*/true);
@@ -1810,6 +1836,18 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
         IRBuilder<> Builder(M);
         Instruction *NewM = Builder.CreateMemSet(
             M->getRawDest(), ByteVal, M->getLength(), M->getDestAlign(), false);
+        // [soundspec] Carry over scope/transmitter metadata from the
+        // memcpy onto the synthesized memset. Verifier requires every
+        // speculation-primitive call (which memset/memcpy both are) to
+        // carry !safe/!unsafe; dropping it on the rewrite breaks the
+        // module.
+        NewM->copyMetadata(*M, {LLVMContext::MD_safe,
+                                LLVMContext::MD_unsafe,
+                                LLVMContext::MD_unsafe_init,
+                                LLVMContext::MD_unsafe_xmit,
+                                LLVMContext::MD_unsafe_spec,
+                                LLVMContext::MD_soundspec_store,
+                                LLVMContext::MD_soundspec_xmit});
         auto *LastDef = cast<MemoryDef>(MA);
         auto *NewAccess =
             MSSAU->createMemoryAccessAfter(NewM, nullptr, LastDef);
