@@ -1465,12 +1465,10 @@ enum NodeType {
   /// UNSAFE_SHADOW_GEN: chain-carrying side-effecting token producer.
   /// Operand 0 is the chain, operand 1 is a TargetConstant i32 scope id;
   /// results are {i32 token, chain}.
-  /// UNSAFE_SHADOW_DEP: operands 0/1 are the two i32 tokens; single i32
-  /// result.
   /// UNSAFE_SHADOW_XMIT: operand 0 is the chain, operand 1 is the i32
   /// token; single chain result.
   /// UNSAFE_SHADOW_ARG: operand 0 is the arbitrary-typed input value;
-  /// single i32 result. Pure passthrough modelled like UNSAFE_SHADOW_DEP.
+  /// single i32 result. Pure passthrough.
   /// UNSAFE_SHADOW_EMBED: operand 0 is the arbitrary-typed value, operand
   /// 1 is the i32 shadow token; single result matches operand 0's type.
   /// Identity passthrough on operand 0.
@@ -1486,7 +1484,6 @@ enum NodeType {
   /// UNSAFE_END: marks end of unsafe scope. Operand 0 is chain; results
   /// are {i32 token, chain}.
   UNSAFE_SHADOW_GEN,
-  UNSAFE_SHADOW_DEP,
   UNSAFE_SHADOW_XMIT,
   UNSAFE_SHADOW_ARG,
   UNSAFE_SHADOW_EMBED,
