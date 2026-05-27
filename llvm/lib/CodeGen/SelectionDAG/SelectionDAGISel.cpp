@@ -2622,13 +2622,6 @@ void SelectionDAGISel::Select_UNSAFE_SHADOW_GEN(SDNode *N) {
                        {N->getOperand(1), N->getOperand(0)});
 }
 
-void SelectionDAGISel::Select_UNSAFE_SHADOW_DEP(SDNode *N) {
-  // SoundSpec shadow-token combiner: tied `$x = $dst` passthrough, `$y` is
-  // an extra register use kept alive but not tied.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_DEP, N->getValueType(0),
-                       {N->getOperand(0), N->getOperand(1)});
-}
-
 void SelectionDAGISel::Select_UNSAFE_SHADOW_XMIT(SDNode *N) {
   // SoundSpec shadow-token sink: chain-carrying pseudo with a single i32
   // register use. The ISD node has chain at operand 0 and the token at
@@ -2648,14 +2641,6 @@ void SelectionDAGISel::Select_UNSAFE_SHADOW_STORE(SDNode *N) {
   CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_STORE,
                        N->getValueType(0),
                        {N->getOperand(1), N->getOperand(2), N->getOperand(0)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_SHADOW_ARG(SDNode *N) {
-  // SoundSpec shadow-token derived from an arbitrary-typed input. Single
-  // operand passthrough; result is the fixed-type i32 shadow token. No
-  // tied operand — see Target.td note on UNSAFE_SHADOW_ARG.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_ARG, N->getValueType(0),
-                       N->getOperand(0));
 }
 
 void SelectionDAGISel::Select_UNSAFE_SHADOW_EMBED(SDNode *N) {
@@ -3458,14 +3443,8 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
   case ISD::UNSAFE_SHADOW_GEN:
     Select_UNSAFE_SHADOW_GEN(NodeToMatch);
     return;
-  case ISD::UNSAFE_SHADOW_DEP:
-    Select_UNSAFE_SHADOW_DEP(NodeToMatch);
-    return;
   case ISD::UNSAFE_SHADOW_XMIT:
     Select_UNSAFE_SHADOW_XMIT(NodeToMatch);
-    return;
-  case ISD::UNSAFE_SHADOW_ARG:
-    Select_UNSAFE_SHADOW_ARG(NodeToMatch);
     return;
   case ISD::UNSAFE_SHADOW_STORE:
     Select_UNSAFE_SHADOW_STORE(NodeToMatch);

@@ -6476,10 +6476,11 @@ SDValue DAGTypeLegalizer::PromoteIntOp_FAKE_USE(SDNode *N) {
   return DAG.getNode(N->getOpcode(), dl, N->getValueType(0), V0, VPromoted);
 }
 
-// SoundSpec: `UNSAFE_SHADOW_ARG` is a meta pseudo (stripped at AsmPrinter),
-// so the operand's actual value is irrelevant for codegen — we only need
-// to keep the SDNode well-typed through legalization. Promote any
-// sub-legal integer operand via ANY_EXTEND.
+// SoundSpec: `UNSAFE_SHADOW_ARG` is target-lowered (e.g. X86 emits
+// UNSAFE_ARG_GR32/GR64), so the operand's actual value matters only
+// insofar as the target ISel needs a legal-typed source register. Promote
+// any sub-legal integer operand via ANY_EXTEND so the X86 ISel sees i32
+// (and routes to UNSAFE_ARG_GR32) instead of an illegal i8/i16/i1.
 SDValue DAGTypeLegalizer::PromoteIntOp_UNSAFE_SHADOW_ARG(SDNode *N) {
   SDLoc dl(N);
   SDValue Arg = N->getOperand(0);

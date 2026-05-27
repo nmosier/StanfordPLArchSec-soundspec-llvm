@@ -5250,25 +5250,23 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
     return;
   }
   case ISD::UNSAFE_SHADOW_ARG: {
-    // Lower to a width-specific UNSAFE_ARG_GR{32,64} instruction (real
-    // x86 `0F 1D 11.ddd.sss`, REX.W for 64-bit). The SDAG node always
-    // produces an i32 shadow result. For an i64 source, the X86
-    // instruction produces a GR64 result and we extract the low
-    // sub_32bit to satisfy the SDAG i32 type.
+    // The shadow-arg node is a pure marker for SDAG: it just makes the
+    // function argument visible as a dep token. For GPR sources we don't
+    // need any actual instruction — the input register IS the shadow
+    // value (i32 src → i32 result is identity; i64 src → i32 result is
+    // the low sub_32bit). Just pass the source through.
     SDLoc DL(Node);
     SDValue Src = Node->getOperand(0);
     MVT SrcVT = Src.getValueType().getSimpleVT();
     switch (SrcVT.SimpleTy) {
     case MVT::i32: {
-      CurDAG->SelectNodeTo(Node, X86::UNSAFE_ARG_GR32, MVT::i32, Src);
+      CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), Src);
+      CurDAG->RemoveDeadNode(Node);
       return;
     }
     case MVT::i64: {
-      SDValue GR64(CurDAG->getMachineNode(X86::UNSAFE_ARG_GR64, DL,
-                                          MVT::i64, Src),
-                   0);
       SDValue I32 = CurDAG->getTargetExtractSubreg(X86::sub_32bit, DL,
-                                                   MVT::i32, GR64);
+                                                   MVT::i32, Src);
       CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), I32);
       CurDAG->RemoveDeadNode(Node);
       return;

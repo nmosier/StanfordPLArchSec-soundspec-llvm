@@ -2138,9 +2138,7 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::UNSAFE_OPEN:
       case TargetOpcode::UNSAFE_CLOSE:
       case TargetOpcode::UNSAFE_SHADOW_GEN:
-      case TargetOpcode::UNSAFE_SHADOW_DEP:
       case TargetOpcode::UNSAFE_SHADOW_XMIT:
-      case TargetOpcode::UNSAFE_SHADOW_ARG:
       case TargetOpcode::UNSAFE_SHADOW_EMBED:
       case TargetOpcode::UNSAFE_SHADOW_STORE:
         // SoundSpec scope-region markers: purely meta. Stripped at
@@ -2177,14 +2175,8 @@ void AsmPrinter::emitFunctionBody() {
           case TargetOpcode::UNSAFE_SHADOW_GEN:
             OutStreamer->emitRawComment("UNSAFE_SHADOW_GEN");
             break;
-          case TargetOpcode::UNSAFE_SHADOW_DEP:
-            OutStreamer->emitRawComment("UNSAFE_SHADOW_DEP");
-            break;
           case TargetOpcode::UNSAFE_SHADOW_XMIT:
             OutStreamer->emitRawComment("UNSAFE_SHADOW_XMIT");
-            break;
-          case TargetOpcode::UNSAFE_SHADOW_ARG:
-            OutStreamer->emitRawComment("UNSAFE_SHADOW_ARG");
             break;
           case TargetOpcode::UNSAFE_SHADOW_EMBED:
             OutStreamer->emitRawComment("UNSAFE_SHADOW_EMBED");

@@ -85,6 +85,7 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   initializeX86FastTileConfigLegacyPass(PR);
   initializeKCFIPass(PR);
   initializeX86SoundSpecCFIPass(PR);
+  initializeX86SoundSpecMIROptimizerPass(PR);
   initializeX86LowerTileCopyLegacyPass(PR);
   initializeX86ExpandPseudoLegacyPass(PR);
   initializeX86ExecutionDomainFixPass(PR);
@@ -579,6 +580,18 @@ void X86PassConfig::addPreEmitPass() {
 void X86PassConfig::addPreEmitPass2() {
   const Triple &TT = TM->getTargetTriple();
   const MCAsmInfo *MAI = TM->getMCAsmInfo();
+
+  // SoundSpec MIR optimizer. Runs late on purpose: by this point all
+  // store-splitters (X86AvoidSFB), branch/layout shufflers
+  // (BranchFolder, TailDuplicate, MachineBlockPlacement), pseudo
+  // expansion (X86ExpandPseudo), and late instruction fixups (FixupBW,
+  // FixupLEA, FixupInstTuning, CompressEVEX) have finished. The MIR
+  // shape the optimizer sees here is essentially the final emitted
+  // shape, minus the security-tail passes (SpecExec, IndirectThunks,
+  // ReturnThunks) that follow. NOTE: MIR is in post-RA / physreg form
+  // here — vreg-rewriting tricks won't work; do peephole-style erases
+  // and physreg-aware rewrites instead.
+  addPass(createX86SoundSpecMIROptimizerPass());
 
   // The X86 Speculative Execution Pass must run after all control
   // flow graph modifying passes. As a result it was listed to run right before

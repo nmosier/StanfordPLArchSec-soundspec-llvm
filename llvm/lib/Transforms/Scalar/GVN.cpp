@@ -1181,9 +1181,16 @@ Value *AvailableValue::MaterializeAdjustedValue(LoadInst *Load,
              LLVMContext::MD_invariant_load, LLVMContext::MD_invariant_group,
              // [soundspec] Scope tags are instruction-identity, not type-
              // dependent. The coerced load is still the same speculative
-             // event in the same scope as the original wider load.
+             // event in the same scope as the original wider load, so all
+             // SoundSpec metadata stays on the surviving load (mirrors
+             // the same-type CSE path in combineMetadata, which preserves
+             // these untouched). The eliminated load's per-instruction
+             // !soundspec.xmit IDs die with it — no merge is needed since
+             // no other instruction references those IDs.
              LLVMContext::MD_safe, LLVMContext::MD_unsafe,
-             LLVMContext::MD_unsafe_xmit, LLVMContext::MD_unsafe_spec});
+             LLVMContext::MD_unsafe_init, LLVMContext::MD_unsafe_xmit,
+             LLVMContext::MD_unsafe_spec, LLVMContext::MD_soundspec_xmit,
+             LLVMContext::MD_soundspec_store});
       LLVM_DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset
                         << "  " << *getCoercedLoadValue() << '\n'
                         << *Res << '\n'

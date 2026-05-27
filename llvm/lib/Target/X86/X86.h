@@ -286,6 +286,11 @@ FunctionPass *createX86ReturnThunksPass();
 /// `soundspec_cfi(id)` function attribute.
 FunctionPass *createX86SoundSpecCFIPass();
 
+/// SoundSpec MIR optimizer. Runs early in the machine pipeline, before
+/// register allocation, performing X86-specific optimizations on the
+/// SoundSpec instructions emitted by ISel.
+FunctionPass *createX86SoundSpecMIROptimizerPass();
+
 /// This pass insert wait instruction after X87 instructions which could raise
 /// fp exceptions when strict-fp enabled.
 FunctionPass *createX86InsertX87waitPass();
@@ -389,6 +394,7 @@ void initializeX86PartialReductionLegacyPass(PassRegistry &);
 void initializeX86PreTileConfigLegacyPass(PassRegistry &);
 void initializeX86ReturnThunksPass(PassRegistry &);
 void initializeX86SoundSpecCFIPass(PassRegistry &);
+void initializeX86SoundSpecMIROptimizerPass(PassRegistry &);
 void initializeX86SpeculativeExecutionSideEffectSuppressionPass(PassRegistry &);
 void initializeX86SpeculativeLoadHardeningPassPass(PassRegistry &);
 void initializeX86SuppressAPXForRelocationLegacyPass(PassRegistry &);

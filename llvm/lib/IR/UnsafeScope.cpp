@@ -214,8 +214,13 @@ static bool isValueConstantPHI(const Value *V) {
 }
 
 bool llvm::isTransmitter(const Instruction &I) {
+#if 0
   auto *V = getTransmittedOperand(I);
   return V && !isValueConstantPHI(V);
+#else
+  auto *V = getTransmittedOperand(I);
+  return isa_and_nonnull<Argument, Instruction>(V);
+#endif
 }
 
 static Metadata *getUnsafeMDElt(int ID, LLVMContext &Ctx) {
@@ -906,4 +911,12 @@ MDNode *unsafe::concatMetadataNodes(MDNode *A, MDNode *B) {
   copy(B->operands(), std::back_inserter(MDs));
   auto &Ctx = A->getContext();
   return MDNode::get(Ctx, MDs);
+}
+
+Value *llvm::getUnsafeShadowDep(IRBuilderBase &IRB, Value *A, Value *B) {
+#if 0
+  return IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_dep, {A, B})
+#else
+  return IRB.CreateOr(A, B);
+#endif
 }

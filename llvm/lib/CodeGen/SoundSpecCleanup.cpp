@@ -20,6 +20,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
@@ -44,16 +45,21 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
+#include "llvm/Transforms/Utils/SoundSpecOptimizer.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
 #define DEBUG_TYPE "soundspec-cleanup"
 
 using namespace llvm;
+
+static cl::opt<bool> SoundSpecStrip("soundspec-strip",
+                                    cl::init(false), cl::Hidden);
 
 namespace {
 
@@ -189,10 +195,39 @@ BasicBlock *robustSplitEdgeInvoke(BasicBlock *From, BasicBlock *OrigTo,
 }
 
 BasicBlock *robustSplitEdge(BasicBlock *From, BasicBlock *To) {
+  // For any terminator with *multiple distinct edges* from `From` to
+  // `To`, `SplitEdge` only redirects ONE such edge through the new
+  // block, leaving the others direct. That leaves the SoundSpec scope
+  // unbalanced (the un-split edges bypass the `unsafe_end` /
+  // `unsafe_begin` we want to insert at the split).
+  //
+  // Multi-edge cases include:
+  //   * SwitchInst with several cases targeting `To` (covered before).
+  //   * IndirectBrInst with `To` listed more than once.
+  //   * `br i1 cond, label %To, label %To` — a degenerate same-target
+  //     conditional branch. Looks weird but appears in unoptimized
+  //     IR (e.g. when an earlier transform collapses both targets but
+  //     hasn't canonicalized to `br label %To` yet). This was the
+  //     surprise case: we previously gated the SplitBlockPredecessors
+  //     path on switch/indirectbr, so `br i1 c, X, X` fell through to
+  //     plain SplitEdge and only one of the two X-edges got the end.
+  //
+  // `SplitBlockPredecessors(To, {From}, ...)` redirects *every* edge
+  // from `From` to `To` through one new block — what SoundSpec needs.
+  auto *Term = From->getTerminator();
+  unsigned NumEdgesToTo = 0;
+  for (unsigned I = 0, E = Term->getNumSuccessors(); I != E; ++I)
+    if (Term->getSuccessor(I) == To)
+      ++NumEdgesToTo;
+  if (NumEdgesToTo > 1) {
+    if (auto *New = SplitBlockPredecessors(To, {From}, ".soundspec.split"))
+      return New;
+  }
+
   if (auto *New = SplitEdge(From, To))
     return New;
 
-  if (auto *Invoke = dyn_cast<InvokeInst>(From->getTerminator());
+  if (auto *Invoke = dyn_cast<InvokeInst>(Term);
       Invoke && Invoke->getUnwindDest() == To) {
     return robustSplitEdgeInvoke(From, To, Invoke);
   }
@@ -218,8 +253,11 @@ void instrumentUnsafeBegin(Instruction *I, Metadata *ID,
     return;
   }
 
-  SmallVector<BasicBlock *> Preds;
-  copy(predecessors(B), std::back_inserter(Preds));
+  // Dedupe — `predecessors(B)` yields one entry per *edge*, so a
+  // SwitchInst whose three cases all target `B` would have us split
+  // that source three times.
+  SmallSetVector<BasicBlock *, 4> Preds;
+  Preds.insert_range(predecessors(B));
   for (auto *PredB : Preds) {
     if (InScopeB(PredB))
       continue;
@@ -239,8 +277,14 @@ void instrumentUnsafeEnd(Instruction *I, Metadata *ID, InstructionPred InScope,
 
   auto *B = I->getParent();
   auto InScopeB = [&](BasicBlock *B) { return InScope(&B->front()); };
-  SmallVector<BasicBlock *> Succs;
-  copy(successors(B), std::back_inserter(Succs));
+  // Dedupe successors. `successors(B)` walks the terminator's successor
+  // list, which has one entry per *edge* — a SwitchInst with three
+  // cases targeting the same block returns that block three times.
+  // Without deduping we'd insert one `unsafe_end` per duplicate at the
+  // target's first insertion point, leaving multiple ends matched to a
+  // single begin (and tripping checkUnsafeBeginEnd).
+  SmallSetVector<BasicBlock *, 4> Succs;
+  Succs.insert_range(successors(B));
   for (auto *SuccB : Succs) {
     if (InScopeB(SuccB))
       continue;
@@ -338,27 +382,39 @@ void computeGenSet(ArrayRef<Instruction *> Extent,
 }
 
 bool runOnUnsafeFunction(Function &F) {
+  auto &Ctx = F.getContext();
+  auto *ID = unsafe::createNewScope(Ctx);
+  auto *IDs = unsafe::getScopeSet(Ctx, {ID});
   {
     IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
     IRB.CreateIntrinsic(Intrinsic::unsafe_begin, {});
     for (auto &A : F.args()) {
       auto *Dep = IRB.CreateUnaryIntrinsic(Intrinsic::unsafe_shadow_arg, &A);
       // NOTE: Tying to dummy value currently.
-      IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_tie,
-                          {IRB.getInt32(0), Dep});
+      unsafe::createShadowTie(IRB, IRB.getInt32(0), Dep, IDs);
     }
   }
 
-  for (auto &I : instructions(F)) {
-    Value *RetVal = nullptr;
-    if (auto *Ret = dyn_cast<ReturnInst>(&I))
-      RetVal = Ret->getReturnValue();
-    else if (auto *Resume = dyn_cast<ResumeInst>(&I))
-      RetVal = Resume->getValue();
-    if (!RetVal)
+  for (auto &B : F) {
+    if (succ_size(&B) > 0)
       continue;
+    Value *RetVal = nullptr;
+    auto &I = *B.getTerminator();
+    if (auto *Ret = dyn_cast<ReturnInst>(&I)) {
+      RetVal = Ret->getReturnValue();
+    } else if (auto *Resume = dyn_cast<ResumeInst>(&I)) {
+      RetVal = Resume->getValue();
+    } else if (isa<UnreachableInst>(&I)) {
+      RetVal = nullptr;
+    } else {
+      errs() << "[soundspec] unhandled terminator: " << I << "\n";
+      std::abort();
+    }
+
     IRBuilder<> IRB(&I);
     auto *End = IRB.CreateIntrinsic(Intrinsic::unsafe_end, {});
+    if (!RetVal)
+      continue;
     auto *NewRetVal = IRB.CreateBinaryIntrinsic(Intrinsic::unsafe_shadow_embed,
                                                 RetVal, End);
     I.replaceUsesOfWith(RetVal, NewRetVal);
@@ -366,7 +422,6 @@ bool runOnUnsafeFunction(Function &F) {
 
   F.removeFnAttr(Attribute::Unsafe);
 
-  auto &Ctx = F.getContext();
   F.setMetadata("soundspec.final", MDNode::get(Ctx, {}));
 
   return true;
@@ -429,17 +484,38 @@ static Value *makeDepAvailableAt(Value *Dep, Instruction *Consumer, DominatorTre
   return VMapper.mapValue(*Dep);
 }
 
-bool runSoundSpecCleanupOnFunction(Function &F) {
+static void removeLoadTies(Function &F) {
+  using namespace llvm::PatternMatch;
+  for (auto &I : make_early_inc_range(instructions(F))) {
+    Value *V;
+    if (!match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_tie>(
+                       m_Value(),
+                       m_Intrinsic<Intrinsic::unsafe_shadow_arg>(m_Value(V)))))
+      continue;
+    LoadInst *Load = dyn_cast<LoadInst>(V);
+    if (!Load)
+      continue;
+    if (Load->getMetadata(LLVMContext::MD_unsafe) !=
+        I.getMetadata(LLVMContext::MD_unsafe))
+      continue;
+    I.eraseFromParent();
+  }
+}
+
+void runOnSafeFunction(Function &F) {
   using namespace llvm::PatternMatch;
 
-  if (F.hasFnAttribute(Attribute::Unsafe))
-    return runOnUnsafeFunction(F);
-
   auto &Ctx = F.getContext();
+
+  // Optimize unsafe scopes before merging.
+  optimizeUnsafeScopes(F);
 
   // First, merge overlapping scopes.
   auto IDSet = getIDSet(F);
   combineScopes(F, IDSet);
+
+  // Optimize unsafe scopes after merging.
+  optimizeUnsafeScopes(F);
 
   // Insert @llvm.unsafe.begin/llvm.unsafe.end for each scope.
   // Remove @llvm.unsafe.gen, replace with value returned by @llvm.unsafe.end.
@@ -540,7 +616,187 @@ bool runSoundSpecCleanupOnFunction(Function &F) {
     if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
       I.eraseFromParent();
 
+  // Remove @llvm.unsafe.shadow.tie()s that are rooted to loads in the same
+  // unsafe scope.
+  // We originally added those in case mem2reg ran. Now that we know it won't,
+  // just remove the @llvm.unsafe.shadow.tie().
+  removeLoadTies(F);
+
   F.setMetadata("soundspec.final", MDNode::get(Ctx, {}));
+}
+
+void instrumentUnsafeArgs(Function &F) {
+  auto IsUnsafeArg = [](const Argument &A) {
+    return A.hasAttribute(Attribute::SoundSpecArgUnsafe);
+  };
+  // Tag any soundspec_arg_unsafe
+  if (any_of(F.args(), IsUnsafeArg)) {
+    // emit @llvm.unsafe.end()
+    auto *B = &F.getEntryBlock();
+    IRBuilder<> IRB(B, B->getFirstInsertionPt());
+    auto *End = IRB.CreateIntrinsic(Intrinsic::unsafe_end, {});
+    for (auto &A : F.args()) {
+      if (!IsUnsafeArg(A))
+        continue;
+      auto *NewA =
+          IRB.CreateBinaryIntrinsic(Intrinsic::unsafe_shadow_embed, &A, End);
+      A.replaceUsesWithIf(NewA, [NewA](Use &U) {
+        return U.getUser() != NewA;
+      });
+    }
+  }
+
+  // Insert @llvm.unsafe.begin() before virtual method calls.
+  for (auto &I : instructions(F)) {
+    auto *C = dyn_cast<CallBase>(&I);
+    if (!C)
+      continue;
+    bool AnyUnsafeArg = false;
+    for (unsigned Idx = 0; Idx < C->arg_size(); ++Idx) {
+      auto Attr = C->getParamAttr(Idx, Attribute::SoundSpecArgUnsafe);
+      AnyUnsafeArg |= Attr.isValid();
+    }
+    if (AnyUnsafeArg) {
+      IRBuilder<> IRB(C);
+      IRB.CreateIntrinsic(Intrinsic::unsafe_begin, {});
+    }
+  }
+}
+
+void debugStripAllIntrinsics(Function &F) {
+#if 0
+  auto &Ctx = F.getContext();
+  for (auto &I : make_early_inc_range(instructions(F))) {
+    using namespace llvm::PatternMatch;
+    Value *ReplVal = ConstantInt::get(IntegerType::get(Ctx, 32), 0);
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_begin>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_end>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_dep>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_arg>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_tie>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_embed>(m_Value(ReplVal), m_Value()))) {
+      if (!I.getType()->isVoidTy())
+        I.replaceAllUsesWith(ReplVal);
+      I.eraseFromParent();
+      continue;
+    }
+  }
+#endif
+}
+
+static void checkUnsafeBeginEnd(Function &F) {
+  using namespace llvm::PatternMatch;
+
+  struct InOut {
+    unsigned In = 0;
+    unsigned Out = 0;
+  };
+  DenseMap<BasicBlock *, InOut> Map;
+  for (auto &B : F) {
+    auto &X = Map[&B];
+    X.In = UINT_MAX;
+    X.Out = UINT_MAX;
+  }
+  Map[&F.getEntryBlock()].In =
+      0; // NOTE: When we re-enable self hardening, this may need to be 1.
+  bool Changed;
+  auto Snapshot = [](const InOut &X) -> uint64_t {
+    return (uint64_t) X.In + (uint64_t) X.Out;
+  };
+  do {
+    Changed = false;
+    for (auto *B : ReversePostOrderTraversal(&F)) {
+      auto &X = Map[B];
+      auto Old = Snapshot(X);
+
+      // Compute IN (min).
+      for (auto *Pred : predecessors(B))
+        X.In = std::min(X.In, Map[Pred].Out);
+
+      // Transfer.
+      X.Out = X.In;
+      for (auto &I : *B) {
+        if (match(&I, m_Intrinsic<Intrinsic::unsafe_begin>())) {
+          assert(X.Out < UINT_MAX && "depth would overflow!");
+          ++X.Out;
+        } else if (match(&I, m_Intrinsic<Intrinsic::unsafe_end>())) {
+          assert(X.Out > 0 && "mismatched unsafe_end!");
+          --X.Out;
+        }
+      }
+
+      auto New = Snapshot(X);
+      assert(New <= Old);
+      Changed |= Old != New;
+    }
+  } while (Changed);
+
+  // Make sure that we don't have a mismatched paths.
+  for (auto *B : ReversePostOrderTraversal(&F)) {
+    for (auto *Pred : predecessors(B)) {
+      assert(Map[B].In == Map[Pred].Out && "mismatched paths!");
+    }
+    if (succ_size(B) == 0)
+      assert(Map[B].Out == 0 && "function exit with unclosed unsafe_begin!");
+  }
+}
+
+static void doStrip(Function &F) {
+  using namespace llvm::PatternMatch;
+  auto &Ctx = F.getContext();
+  auto *Zero = ConstantInt::get(IntegerType::get(Ctx, 32), 0);
+  for (auto &I : make_early_inc_range(instructions(F))) {
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_gen>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_dep>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_arg>())) {
+      I.replaceAllUsesWith(Zero);
+      I.eraseFromParent();
+      continue;
+    }
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_tie>()) ||
+        match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>())) {
+      I.eraseFromParent();
+      continue;
+    }
+    Value *V;
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_embed>(m_Value(V),
+                                                              m_Value()))) {
+      I.replaceAllUsesWith(V);
+      I.eraseFromParent();
+      continue;
+    }
+  }
+}
+
+bool runSoundSpecCleanupOnFunction(Function &F) {
+  auto &Ctx = F.getContext();
+
+  if (SoundSpecStrip) {
+    doStrip(F);
+    F.setMetadata("soundspec.final", MDNode::get(Ctx, {}));
+    return true;
+  }
+
+  if (F.hasFnAttribute(Attribute::Unsafe)) {
+    runOnUnsafeFunction(F);
+  } else {
+    runOnSafeFunction(F);
+  }
+
+  // FIXME: Need to re-enable this!
+#if 0
+  instrumentUnsafeArgs(F);
+#endif
+
+  checkUnsafeBeginEnd(F);
+
+  // If we have any soundspec_arg_unsafe, then we need to
+  // insert a @llvm.unsafe.end()
+
+#if 0
+  // DEBUG: Remove all intrinsics!
+  debugStripAllIntrinsics(F);
+#endif
 
   return true;
 }

@@ -32,6 +32,7 @@
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ProfDataUtils.h"
+#include "llvm/IR/UnsafeScope.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -57,6 +58,10 @@ STATISTIC(NumSoundSpecMergeStoresBailed,
           "[soundspec] consecutive-store merges skipped because at least "
           "one part store carries an !unsafe/!safe/!soundspec.store tag "
           "and there is no single correct scope ID for the merged store");
+STATISTIC(NumSoundSpecMergeLoadsBailed,
+          "[soundspec] consecutive-load merges skipped because at least "
+          "one part load carries !safe and the merged wider load cannot "
+          "soundly preserve that guarantee");
 
 static cl::opt<unsigned> MaxInstrsToScan(
     "aggressive-instcombine-max-scan-instrs", cl::init(64), cl::Hidden,
@@ -641,6 +646,13 @@ struct LoadOps {
   uint64_t Shift = 0;
   Type *ZextType;
   AAMDNodes AATags;
+  // SoundSpec scope merging across all loads folded into the wider load.
+  // HasSafe is set if any merged load carries !safe — we then bail the
+  // whole transform since merging would silently drop that guarantee.
+  // UnsafeUnion accumulates the union of !unsafe scope-ID sets across
+  // every merged load and gets stamped on the new wider load.
+  bool HasSafe = false;
+  MDNode *UnsafeUnion = nullptr;
 };
 
 // Identify and Merge consecutive loads recursively which is of the form
@@ -775,12 +787,20 @@ static bool foldLoadsRecursive(Value *V, LoadOps &LOps, const DataLayout &DL,
   if (LOps.FoundRoot == false) {
     LOps.FoundRoot = true;
     AATags1 = LI1->getAAMetadata();
+    // Seed the SoundSpec scope merge from LI1 too.
+    LOps.HasSafe = LI1->getMetadata(LLVMContext::MD_safe) != nullptr;
+    LOps.UnsafeUnion = LI1->getMetadata(LLVMContext::MD_unsafe);
   }
   LOps.LoadSize = LoadSize1 + LoadSize2;
   LOps.RootInsert = Start;
 
   // Concatenate the AATags of the Merged Loads.
   LOps.AATags = AATags1.concat(AATags2);
+
+  // Merge LI2's SoundSpec scope metadata into the running accumulators.
+  LOps.HasSafe |= LI2->getMetadata(LLVMContext::MD_safe) != nullptr;
+  LOps.UnsafeUnion = unsafe::mergeMetadata(
+      LOps.UnsafeUnion, LI2->getMetadata(LLVMContext::MD_unsafe));
 
   LOps.Root = LI1;
   LOps.Shift = ShAmt1;
@@ -801,6 +821,14 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,
   LoadOps LOps;
   if (!foldLoadsRecursive(&I, LOps, DL, AA) || !LOps.FoundRoot)
     return false;
+
+  // Bail if any merged load carries !safe — folding into a single wider
+  // load would silently drop that guarantee, and we can't represent
+  // "this byte range is safe, this byte range is unsafe" on one load.
+  if (LOps.HasSafe) {
+    ++NumSoundSpecMergeLoadsBailed;
+    return false;
+  }
 
   IRBuilder<> Builder(&I);
   LoadInst *NewLoad = nullptr, *LI1 = LOps.Root;
@@ -834,6 +862,13 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,
   // Set the New Load AATags Metadata.
   if (LOps.AATags)
     NewLoad->setAAMetadata(LOps.AATags);
+
+  // Propagate the merged SoundSpec !unsafe scope set. (We've already
+  // bailed above if any merged load was !safe, so no !safe stamping
+  // here.) UnsafeUnion is null when none of the merged loads carried
+  // !unsafe — leave the new load untagged in that case.
+  if (LOps.UnsafeUnion)
+    NewLoad->setMetadata(LLVMContext::MD_unsafe, LOps.UnsafeUnion);
 
   Value *NewOp = NewLoad;
   // Check if zero extend needed.

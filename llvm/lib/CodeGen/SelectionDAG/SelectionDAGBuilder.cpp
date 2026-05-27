@@ -7130,11 +7130,16 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     return;
   }
   case Intrinsic::unsafe_shadow_dep: {
-    // SoundSpec shadow-token combiner. Pure: no chain, two i32 inputs to
-    // one i32 output.
+    // SoundSpec shadow-token combiner. Lowers to a plain 32-bit OR: the
+    // shadow IR uses OR-semantics to merge two dep tokens, and at the
+    // machine level a regular `or r32, r32` carries the same data
+    // dependency for the speculation-blocker that consumes the result.
+    // Going straight to ISD::OR lets the existing target ISel patterns
+    // pick the right instruction (X86 OR32rr, etc.) and lets DAGCombine
+    // do its usual cleanup (e.g. folding `dep(x, 0) -> x`).
     SDValue X = getValue(I.getArgOperand(0));
     SDValue Y = getValue(I.getArgOperand(1));
-    setValue(&I, DAG.getNode(ISD::UNSAFE_SHADOW_DEP, sdl, MVT::i32, X, Y));
+    setValue(&I, DAG.getNode(ISD::OR, sdl, MVT::i32, X, Y));
     return;
   }
   case Intrinsic::unsafe_shadow_xmit: {
@@ -7189,24 +7194,40 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   case Intrinsic::unsafe_shadow_embed: {
     // SoundSpec passthrough: result type matches operand 0. Operand 1 is
     // the i32 shadow token, kept as an extra register use. For aggregate
-    // types (e.g. `{ ptr, i64 }`), `getValue` returns a MERGE_VALUES with
-    // one SDAG value per flattened field, so we emit one
+    // IR types (e.g. `{ ptr, i64 }`), `getValue` returns a MERGE_VALUES
+    // with one SDAG value per flattened field, so we emit one
     // UNSAFE_SHADOW_EMBED per field and stitch them back together with a
     // MERGE_VALUES — otherwise the new SDNode would have just a single
     // result and downstream visitors (e.g. `visitRet`) would assert
     // accessing the higher-indexed values.
-    SDValue Val = getValue(I.getArgOperand(0));
+    //
+    // The field count MUST come from the IR type — *not* from
+    // `Val.getNode()->getNumValues()`, which counts every SDAG result of
+    // the producing node (including chain/glue outputs of e.g. a LOAD).
+    // Using the SDNode count was a long-standing bug: for scalar-typed
+    // embeds whose data came from a load, NumVals was 2 (data + chain),
+    // and the second iteration created a bogus UNSAFE_SHADOW_EMBED with
+    // an MVT::Other "data" operand — corrupting the SDAG with a phantom
+    // chain-typed embed that downstream passes couldn't make sense of,
+    // manifesting as runtime miscompilation.
     SDValue Tok = getValue(I.getArgOperand(1));
-    unsigned NumVals = Val.getNode()->getNumValues();
+    SmallVector<EVT, 4> ValueVTs;
+    ComputeValueVTs(DAG.getTargetLoweringInfo(), DAG.getDataLayout(),
+                    I.getArgOperand(0)->getType(), ValueVTs);
+    unsigned NumVals = ValueVTs.size();
     if (NumVals == 1) {
+      SDValue Val = getValue(I.getArgOperand(0));
       setValue(&I,
                DAG.getNode(ISD::UNSAFE_SHADOW_EMBED, sdl, Val.getValueType(),
                            Val, Tok));
     } else {
+      SDValue Val = getValue(I.getArgOperand(0));
+      assert(Val.getNode()->getNumValues() >= NumVals &&
+             "aggregate IR value lowered to too few SDAG results");
       SmallVector<SDValue, 4> Embedded;
       Embedded.reserve(NumVals);
       for (unsigned Idx = 0; Idx < NumVals; ++Idx) {
-        SDValue Field(Val.getNode(), Idx);
+        SDValue Field(Val.getNode(), Val.getResNo() + Idx);
         Embedded.push_back(DAG.getNode(ISD::UNSAFE_SHADOW_EMBED, sdl,
                                        Field.getValueType(), Field, Tok));
       }

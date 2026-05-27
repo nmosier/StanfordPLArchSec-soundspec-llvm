@@ -163,6 +163,8 @@ public:
 
 void sortInstructionsInRPO(MutableArrayRef<Instruction *> Insts);
 
+Value *getUnsafeShadowDep(IRBuilderBase &IRB, Value *A, Value *B);
+
 } // namespace llvm
 
 #endif

@@ -74,6 +74,7 @@ set(sources
   X86RegisterInfo.cpp
   X86ReturnThunks.cpp
   X86SoundSpecCFI.cpp
+  X86SoundSpecMIROptimizer.cpp
   X86SelectionDAGInfo.cpp
   X86ShuffleDecodeConstantPool.cpp
   X86SpeculativeLoadHardening.cpp
