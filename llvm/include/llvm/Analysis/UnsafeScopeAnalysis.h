@@ -7,12 +7,10 @@
 //===----------------------------------------------------------------------===//
 //
 // This file provides a per-function analysis that summarizes the
-// SoundSpec unsafe scopes present in the IR. An unsafe scope is delimited
-// by paired llvm.unsafe.enter / llvm.unsafe.exit intrinsic calls, both
-// carrying the same i32 scope id. Each scope is a set of instructions
-// dynamically reachable from an enter without an intervening matching
-// exit. The analysis result lets clients ask whether an instruction is
-// inside a given scope, enumerate all scopes in the function, etc.
+// SoundSpec unsafe scopes present in the IR. Each scope is identified by
+// an i32 scope id carried on the SoundSpec unsafe intrinsics. The analysis
+// result lets clients ask whether an instruction is inside a given scope,
+// enumerate all scopes in the function, etc.
 //
 //===----------------------------------------------------------------------===//
 

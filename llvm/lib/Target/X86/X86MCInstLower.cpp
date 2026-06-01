@@ -942,25 +942,27 @@ void X86AsmPrinter::LowerKCFI_CHECK(const MachineInstr &MI) {
   OutStreamer->emitLabel(Pass);
 }
 
-// Emit a 7-byte SoundSpec CFI marker: 0F 01 <ModRM> <imm32>.
-// The ModR/M byte selects between landing-pad (DEST = AE) and call-site
-// (SRC = AF) variants; in both cases mod=10 (disp32) and reg=5, so the
-// 32-bit displacement carries the CFI label.
+// Emit a 7-byte SoundSpec CFI marker: 0F 1E <ModRM> <imm32>.
+// The ModR/M byte selects between call-site (SRC = 0x80) and landing-pad
+// (DEST = 0x81) variants; in both cases mod=10 (disp32) and reg=0, so the
+// 32-bit displacement carries the CFI label. The byte pattern is reserved
+// at `0F 1E /0` on stock x86 (#UD), and a custom hook in X86Disassembler.cpp
+// re-decodes it back to the SOUNDSPEC_CFI_{SRC,DEST} MCInsts for llvm-objdump.
 static void emitSoundSpecCFIMarker(MCStreamer &OutStreamer,
                                    const MachineInstr &MI, uint8_t ModRM) {
   const uint32_t Id = static_cast<uint32_t>(MI.getOperand(0).getImm());
-  const uint8_t Prefix[3] = {0x0F, 0x01, ModRM};
+  const uint8_t Prefix[3] = {0x0F, 0x1E, ModRM};
   OutStreamer.emitBytes(
       StringRef(reinterpret_cast<const char *>(Prefix), sizeof(Prefix)));
   OutStreamer.emitIntValue(Id, /*Size=*/4);
 }
 
 void X86AsmPrinter::LowerSOUNDSPEC_CFI_DEST(const MachineInstr &MI) {
-  emitSoundSpecCFIMarker(*OutStreamer, MI, /*ModRM=*/0xAE);
+  emitSoundSpecCFIMarker(*OutStreamer, MI, /*ModRM=*/0x81);
 }
 
 void X86AsmPrinter::LowerSOUNDSPEC_CFI_SRC(const MachineInstr &MI) {
-  emitSoundSpecCFIMarker(*OutStreamer, MI, /*ModRM=*/0xAF);
+  emitSoundSpecCFIMarker(*OutStreamer, MI, /*ModRM=*/0x80);
 }
 
 void X86AsmPrinter::LowerASAN_CHECK_MEMACCESS(const MachineInstr &MI) {

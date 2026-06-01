@@ -4839,7 +4839,15 @@ Instruction *InstCombinerImpl::visitCallBase(CallBase &Call) {
       }
     });
 
-    return CallBase::removeOperandBundle(&Call, LLVMContext::OB_kcfi);
+    // `removeOperandBundle` builds a fresh CallInst with the same operands
+    // and attributes but does NOT copy instruction metadata. Carry it over
+    // so kinds that don't ride on attributes/bundles (debug locs aside) —
+    // e.g. SoundSpec's `!unsafe` / `!safe` on transmitter calls — survive
+    // the bundle drop. Without this, those metadata vanish silently and any
+    // downstream verifier that requires them fires only here.
+    auto *NewCall = CallBase::removeOperandBundle(&Call, LLVMContext::OB_kcfi);
+    NewCall->copyMetadata(Call);
+    return NewCall;
   }
 
   if (isRemovableAlloc(&Call, &TLI))

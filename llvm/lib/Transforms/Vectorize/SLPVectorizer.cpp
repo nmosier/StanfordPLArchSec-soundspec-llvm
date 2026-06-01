@@ -116,10 +116,15 @@ STATISTIC(NumVectorInstructions, "Number of vector instructions generated");
 STATISTIC(NumSoundSpecSLPBundleBailed,
           "[soundspec] SLP load/store bundles abandoned because the "
           "scalars carry a mix of `!safe` and `!unsafe` scope tags");
+STATISTIC(NumSoundSpecSLPXmitBailed,
+          "[soundspec] SLP load/store bundles abandoned because a scalar "
+          "carries `!soundspec.xmit` (collapsing distinct transmitters into "
+          "one vector op would require synthesizing a merged transmitter ID)");
 
 // [soundspec] Forward declarations; definitions live next to the SLP-local
 // propagateMetadata helper.
 static bool bundleHasSoundSpecMix(ArrayRef<Value *> VL);
+static bool bundleHasSoundSpecXmit(ArrayRef<Value *> VL);
 static void propagateSoundSpecScope(Instruction *NewInst,
                                     ArrayRef<Value *> VL);
 
@@ -10462,6 +10467,13 @@ BoUpSLP::TreeEntry::EntryState BoUpSLP::getScalarsVectorizationState(
       ++NumSoundSpecSLPBundleBailed;
       return TreeEntry::NeedToGather;
     }
+    // [soundspec] Bundles whose scalars carry `!soundspec.xmit` can't be
+    // collapsed without synthesizing a merged transmitter ID for the result.
+    if (!F->hasFnAttribute(Attribute::Unsafe) &&
+        bundleHasSoundSpecXmit(VL)) {
+      ++NumSoundSpecSLPXmitBailed;
+      return TreeEntry::NeedToGather;
+    }
     // Check that a vectorized load would load the same memory as a scalar
     // load. For example, we don't want to vectorize loads that are smaller
     // than 8-bit. Even though we have a packed struct {<i2, i2, i2, i2>} LLVM
@@ -10648,6 +10660,12 @@ BoUpSLP::TreeEntry::EntryState BoUpSLP::getScalarsVectorizationState(
     if (!F->hasFnAttribute(Attribute::Unsafe) &&
         bundleHasSoundSpecMix(VL)) {
       ++NumSoundSpecSLPBundleBailed;
+      return TreeEntry::NeedToGather;
+    }
+    // [soundspec] Same `!soundspec.xmit` bail as for loads.
+    if (!F->hasFnAttribute(Attribute::Unsafe) &&
+        bundleHasSoundSpecXmit(VL)) {
+      ++NumSoundSpecSLPXmitBailed;
       return TreeEntry::NeedToGather;
     }
     // Check if the stores are consecutive or if we need to swizzle them.
@@ -19822,6 +19840,22 @@ static bool bundleHasSoundSpecMix(ArrayRef<Value *> VL) {
       AnySafe = true;
   }
   return AnyUnsafe && AnySafe;
+}
+
+// [soundspec] Returns true if any scalar in \p VL is a transmitter carrying
+// `!soundspec.xmit`. Vectorizing such a bundle would fold several distinct
+// transmitters into a single vector op, which would then need a synthesized
+// merged transmitter ID to satisfy the verifier. Rather than fabricate one we
+// abandon the bundle.
+static bool bundleHasSoundSpecXmit(ArrayRef<Value *> VL) {
+  for (Value *V : VL) {
+    auto *I = dyn_cast<Instruction>(V);
+    if (!I)
+      continue;
+    if (I->getMetadata(LLVMContext::MD_soundspec_xmit))
+      return true;
+  }
+  return false;
 }
 
 // [soundspec] After the bundle has been determined to be uniformly tagged

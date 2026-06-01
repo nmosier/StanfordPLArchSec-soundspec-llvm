@@ -1873,6 +1873,24 @@ MCDisassembler::DecodeStatus X86GenericDisassembler::getInstruction(
     raw_ostream &CStream) const {
   CommentStream = &CStream;
 
+  // SoundSpec CFI markers: 7-byte sequences `0F 1E 80 <imm32>` (call-site,
+  // SOUNDSPEC_CFI_SRC) and `0F 1E 81 <imm32>` (landing-pad, SOUNDSPEC_CFI_DEST).
+  // These are reserved Group-7-style encodings (`0F 1E /0` with a memory-form
+  // ModR/M) that the auto-generated decoder rejects as "(bad)" — intercept the
+  // pattern here so `llvm-objdump` renders them with the proper mnemonic and
+  // CFI label. AsmPrinter emits the raw bytes via `emitSoundSpecCFIMarker`;
+  // this is the matching inverse.
+  if (Bytes.size() >= 7 && Bytes[0] == 0x0F && Bytes[1] == 0x1E &&
+      (Bytes[2] == 0x80 || Bytes[2] == 0x81)) {
+    uint32_t Id = uint32_t(Bytes[3]) | (uint32_t(Bytes[4]) << 8) |
+                  (uint32_t(Bytes[5]) << 16) | (uint32_t(Bytes[6]) << 24);
+    Instr.setOpcode(Bytes[2] == 0x80 ? X86::SOUNDSPEC_CFI_SRC
+                                     : X86::SOUNDSPEC_CFI_DEST);
+    Instr.addOperand(MCOperand::createImm(Id));
+    Size = 7;
+    return Success;
+  }
+
   InternalInstruction Insn;
   memset(&Insn, 0, sizeof(InternalInstruction));
   Insn.bytes = Bytes;

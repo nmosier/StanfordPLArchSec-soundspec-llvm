@@ -334,11 +334,8 @@ void DAGTypeLegalizer::PromoteIntegerResult(SDNode *N, unsigned ResNo) {
   case ISD::FREEZE:
     Res = PromoteIntRes_FREEZE(N);
     break;
-  case ISD::UNSAFE_IN:
-  case ISD::UNSAFE_OUT:
-  case ISD::UNSAFE_DEP:
   case ISD::UNSAFE_SHADOW_EMBED:
-    Res = PromoteIntRes_UNSAFE_IN_OUT(N);
+    Res = PromoteIntRes_UNSAFE_SHADOW_EMBED(N);
     break;
 
   case ISD::ROTL:
@@ -649,12 +646,11 @@ SDValue DAGTypeLegalizer::PromoteIntRes_FREEZE(SDNode *N) {
                      V.getValueType(), V);
 }
 
-// SoundSpec passthrough markers (UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP): promote
-// operand 0's type to a legal integer, then rebuild the same opcode with
-// the promoted operand. Any trailing operands (e.g. the `i32 imm` scope id
-// for UNSAFE_IN/UNSAFE_OUT) are preserved as-is. UNSAFE_DEP has no scope
-// operand — the scope lives on `!unsafe` metadata.
-SDValue DAGTypeLegalizer::PromoteIntRes_UNSAFE_IN_OUT(SDNode *N) {
+// SoundSpec passthrough marker (UNSAFE_SHADOW_EMBED): promote operand 0's
+// type to a legal integer, then rebuild the same opcode with the promoted
+// operand. Any trailing operands (e.g. the shadow token) are preserved
+// as-is.
+SDValue DAGTypeLegalizer::PromoteIntRes_UNSAFE_SHADOW_EMBED(SDNode *N) {
   SDValue V = GetPromotedInteger(N->getOperand(0));
   SmallVector<SDValue, 2> Ops;
   Ops.push_back(V);
@@ -3069,10 +3065,7 @@ void DAGTypeLegalizer::ExpandIntegerResult(SDNode *N, unsigned ResNo) {
                        "operator!");
 
   case ISD::ARITH_FENCE:  SplitRes_ARITH_FENCE(N, Lo, Hi); break;
-  case ISD::UNSAFE_IN:
-  case ISD::UNSAFE_OUT:
-  case ISD::UNSAFE_DEP:
-  case ISD::UNSAFE_SHADOW_EMBED: SplitRes_UNSAFE_IN_OUT(N, Lo, Hi); break;
+  case ISD::UNSAFE_SHADOW_EMBED: SplitRes_UNSAFE_SHADOW_EMBED(N, Lo, Hi); break;
   case ISD::MERGE_VALUES: SplitRes_MERGE_VALUES(N, ResNo, Lo, Hi); break;
   case ISD::SELECT:       SplitRes_Select(N, Lo, Hi); break;
   case ISD::SELECT_CC:    SplitRes_SELECT_CC(N, Lo, Hi); break;

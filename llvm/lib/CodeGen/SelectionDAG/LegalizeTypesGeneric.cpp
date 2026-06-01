@@ -619,13 +619,11 @@ void DAGTypeLegalizer::SplitRes_ARITH_FENCE(SDNode *N, SDValue &Lo,
   Hi = DAG.getNode(ISD::ARITH_FENCE, DL, H.getValueType(), H);
 }
 
-// SoundSpec passthrough markers (UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP). Split
-// operand 0 into Lo/Hi halves and rebuild the same opcode on each half,
-// threading any trailing operands (e.g. the `i32 imm` scope id on
-// UNSAFE_IN/UNSAFE_OUT) through both copies. UNSAFE_DEP has no scope
-// operand — the scope lives on `!unsafe` metadata.
-void DAGTypeLegalizer::SplitRes_UNSAFE_IN_OUT(SDNode *N, SDValue &Lo,
-                                              SDValue &Hi) {
+// SoundSpec passthrough marker (UNSAFE_SHADOW_EMBED). Split operand 0 into
+// Lo/Hi halves and rebuild the same opcode on each half, threading any
+// trailing operands (e.g. the shadow token) through both copies.
+void DAGTypeLegalizer::SplitRes_UNSAFE_SHADOW_EMBED(SDNode *N, SDValue &Lo,
+                                                    SDValue &Hi) {
   SDValue L, H;
   SDLoc DL(N);
   GetSplitOp(N->getOperand(0), L, H);

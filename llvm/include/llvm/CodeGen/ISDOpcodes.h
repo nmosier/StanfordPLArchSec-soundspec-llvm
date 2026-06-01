@@ -1435,62 +1435,25 @@ enum NodeType {
   LIFETIME_START,
   LIFETIME_END,
 
-  /// SoundSpec scope-region markers. Lowered from `llvm.unsafe.{enter,exit}`
-  /// (chain-carrying, no result value; operand 0 is the chain, operand 1 is
-  /// a TargetConstant i32 scope ID), `llvm.unsafe.{in,out}` (passthrough of
-  /// the first operand; operand 0 is the value, operand 1 is a
-  /// TargetConstant i32 scope ID, result type matches operand 0), and
-  /// `llvm.unsafe.dep` (passthrough of the first operand; operand 0 is the
-  /// value, operand 1 is a runtime i32 dependency-tag register value, result
-  /// type matches operand 0).
-  UNSAFE_ENTER,
-  UNSAFE_EXIT,
-  UNSAFE_IN,
-  UNSAFE_OUT,
-  UNSAFE_DEP,
-
-  /// SoundSpec speculation-window barriers. Lowered from
-  /// `llvm.unsafe.open(i32)` and `i32 llvm.unsafe.close()`. Both are
-  /// chain-carrying full memory barriers.
-  /// UNSAFE_OPEN: operand 0 is the chain, operand 1 is the runtime i32
-  /// register value to mark; result is a single chain (no value).
-  /// UNSAFE_CLOSE: operand 0 is the chain; results are {i32 value, chain}.
-  UNSAFE_OPEN,
-  UNSAFE_CLOSE,
-
-  /// SoundSpec shadow-token nodes. Lowered from
-  /// `i32 llvm.unsafe.shadow.gen(i32)`,
-  /// `i32 llvm.unsafe.shadow.dep(i32, i32)`, and
-  /// `void llvm.unsafe.shadow.xmit(i32)`.
-  /// UNSAFE_SHADOW_GEN: chain-carrying side-effecting token producer.
-  /// Operand 0 is the chain, operand 1 is a TargetConstant i32 scope id;
-  /// results are {i32 token, chain}.
-  /// UNSAFE_SHADOW_XMIT: operand 0 is the chain, operand 1 is the i32
-  /// token; single chain result.
+  /// SoundSpec shadow-token nodes.
   /// UNSAFE_SHADOW_ARG: operand 0 is the arbitrary-typed input value;
   /// single i32 result. Pure passthrough.
   /// UNSAFE_SHADOW_EMBED: operand 0 is the arbitrary-typed value, operand
   /// 1 is the i32 shadow token; single result matches operand 0's type.
   /// Identity passthrough on operand 0.
-  /// UNSAFE_SHADOW_STORE: side-effecting shadow-memory store. Operand 0
-  /// is the chain, operand 1 is the i32 shadow address, operand 2 is
-  /// the i32 shadow data; single chain result.
-  /// UNSAFE_WAIT: side-effecting wait on a shadow token. Lowered from
-  /// `llvm.unsafe.shadow.tie(data, tok)`; the data operand is dropped
-  /// at the SDAG layer. Operand 0 is the chain, operand 1 is the i32
-  /// token; single chain result.
-  /// UNSAFE_BEGIN: marks beginning of unsafe scope. Operand 0 is chain;
-  /// single chain result.
+  /// UNSAFE_BEGIN: marks beginning of unsafe scope. Operand 0 is chain,
+  /// operand 1 is the i32 dep token; single chain result.
   /// UNSAFE_END: marks end of unsafe scope. Operand 0 is chain; results
   /// are {i32 token, chain}.
-  UNSAFE_SHADOW_GEN,
-  UNSAFE_SHADOW_XMIT,
+  /// SAFE_BEGIN / SAFE_END: open / close a SoundSpec safe region. Chain-
+  /// carrying with no value operands or results. Operand 0 is chain; single
+  /// chain result.
   UNSAFE_SHADOW_ARG,
   UNSAFE_SHADOW_EMBED,
-  UNSAFE_SHADOW_STORE,
-  UNSAFE_WAIT,
   UNSAFE_BEGIN,
   UNSAFE_END,
+  SAFE_BEGIN,
+  SAFE_END,
 
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for

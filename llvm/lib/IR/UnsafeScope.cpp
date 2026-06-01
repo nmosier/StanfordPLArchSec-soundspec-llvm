@@ -339,7 +339,6 @@ bool unsafe::isRelevantCall(const Instruction &I) {
   case Intrinsic::unsafe_shadow_xmit:
   case Intrinsic::unsafe_shadow_arg:
   case Intrinsic::unsafe_shadow_embed:
-  case Intrinsic::unsafe_shadow_store:
   case Intrinsic::unsafe_begin:
   case Intrinsic::unsafe_end:
     return false;
@@ -901,6 +900,11 @@ void llvm::sortInstructionsInRPO(MutableArrayRef<Instruction *> Insts) {
   copy(Result, Insts.begin());
 }
 
+void llvm::sortInstructionsInPO(MutableArrayRef<Instruction *> Insts) {
+  sortInstructionsInRPO(Insts);
+  reverse(Insts);
+}
+
 MDNode *unsafe::concatMetadataNodes(MDNode *A, MDNode *B) {
   if (!A)
     return B;
@@ -914,6 +918,14 @@ MDNode *unsafe::concatMetadataNodes(MDNode *A, MDNode *B) {
 }
 
 Value *llvm::getUnsafeShadowDep(IRBuilderBase &IRB, Value *A, Value *B) {
+  auto IsZero = [](Value *A) {
+    auto *C = dyn_cast<ConstantInt>(A);
+    return C && C->isZeroValue();
+  };
+  if (IsZero(A))
+    return B;
+  if (IsZero(B))
+    return A;
 #if 0
   return IRB.CreateIntrinsic(Intrinsic::unsafe_shadow_dep, {A, B})
 #else

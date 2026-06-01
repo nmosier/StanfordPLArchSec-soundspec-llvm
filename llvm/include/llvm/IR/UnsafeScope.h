@@ -138,6 +138,7 @@ public:
 
   const DomSetType &dominanceSet() const { return DomSet; }
 
+  // TODO: Delete this.
   // Get the values consumed by each instruction in the dominance set.
   DenseMap<Instruction *, SmallSet<Value *, 4>> computeConsumptionFrontier();
 
@@ -147,6 +148,7 @@ public:
 
 void replaceUnsafeScopeWith(Function &F, Metadata *Old, Metadata *New);
 
+// TODO: Delete this?
 class GenAnalysisImpl {
   Function &F;
   LLVMContext &Ctx;
@@ -162,6 +164,7 @@ public:
 };
 
 void sortInstructionsInRPO(MutableArrayRef<Instruction *> Insts);
+void sortInstructionsInPO(MutableArrayRef<Instruction *> Insts);
 
 Value *getUnsafeShadowDep(IRBuilderBase &IRB, Value *A, Value *B);
 

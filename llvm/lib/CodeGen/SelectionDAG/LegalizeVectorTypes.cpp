@@ -3651,6 +3651,9 @@ bool DAGTypeLegalizer::SplitVectorOperand(SDNode *N, unsigned OpNo) {
   case ISD::FAKE_USE:
     Res = SplitVecOp_FAKE_USE(N);
     break;
+  case ISD::UNSAFE_SHADOW_ARG:
+    Res = SplitVecOp_UNSAFE_SHADOW_ARG(N);
+    break;
   case ISD::ANY_EXTEND_VECTOR_INREG:
   case ISD::SIGN_EXTEND_VECTOR_INREG:
   case ISD::ZERO_EXTEND_VECTOR_INREG:
@@ -3895,6 +3898,17 @@ SDValue DAGTypeLegalizer::SplitVecOp_FAKE_USE(SDNode *N) {
   SDValue Chain =
       DAG.getNode(ISD::FAKE_USE, SDLoc(), MVT::Other, N->getOperand(0), Lo);
   return DAG.getNode(ISD::FAKE_USE, SDLoc(), MVT::Other, Chain, Hi);
+}
+
+// SoundSpec: `i32 shadow.arg(<T> value)` accepts any operand type. When the
+// operand is a vector that's too large to be legal, split it and derive the
+// token from the Lo half — mirrors `ExpandIntOp_UNSAFE_SHADOW_ARG`'s Lo-only
+// approach. For non-GPR vector sources the X86 ISel fallback emits an LFENCE
+// + zero token regardless, so the exact Lo-vs-combined choice is moot.
+SDValue DAGTypeLegalizer::SplitVecOp_UNSAFE_SHADOW_ARG(SDNode *N) {
+  SDValue Lo, Hi;
+  GetSplitVector(N->getOperand(0), Lo, Hi);
+  return DAG.getNode(N->getOpcode(), SDLoc(N), N->getValueType(0), Lo);
 }
 
 SDValue DAGTypeLegalizer::SplitVecOp_BITCAST(SDNode *N) {
@@ -7102,6 +7116,9 @@ bool DAGTypeLegalizer::WidenVectorOperand(SDNode *N, unsigned OpNo) {
   case ISD::FAKE_USE:
     Res = WidenVecOp_FAKE_USE(N);
     break;
+  case ISD::UNSAFE_SHADOW_ARG:
+    Res = WidenVecOp_UNSAFE_SHADOW_ARG(N);
+    break;
   case ISD::CONCAT_VECTORS:     Res = WidenVecOp_CONCAT_VECTORS(N); break;
   case ISD::INSERT_SUBVECTOR:   Res = WidenVecOp_INSERT_SUBVECTOR(N); break;
   case ISD::EXTRACT_SUBVECTOR:  Res = WidenVecOp_EXTRACT_SUBVECTOR(N); break;
@@ -7483,6 +7500,16 @@ SDValue DAGTypeLegalizer::WidenVecOp_FAKE_USE(SDNode *N) {
   SDValue WidenedOp = GetWidenedVector(N->getOperand(1));
   return DAG.getNode(ISD::FAKE_USE, SDLoc(), MVT::Other, N->getOperand(0),
                      WidenedOp);
+}
+
+// SoundSpec: `i32 shadow.arg(<T> value)` accepts any operand type. When the
+// operand is a vector narrower than the target's legal width, widen it
+// (extra lanes are undef) and rebuild the shadow.arg on the widened operand.
+// The i32 token result is unaffected. Mirrors `PromoteIntOp_UNSAFE_SHADOW_ARG`
+// for the scalar-integer widening case.
+SDValue DAGTypeLegalizer::WidenVecOp_UNSAFE_SHADOW_ARG(SDNode *N) {
+  SDValue Widened = GetWidenedVector(N->getOperand(0));
+  return DAG.getNode(N->getOpcode(), SDLoc(N), N->getValueType(0), Widened);
 }
 
 SDValue DAGTypeLegalizer::WidenVecOp_CONCAT_VECTORS(SDNode *N) {

@@ -47,24 +47,6 @@ bool UnsafeScopeInfo::invalidate(Function &, const PreservedAnalyses &PA,
 
 void UnsafeScopeInfo::print(raw_ostream &OS) const { errs() << "TODO\n"; }
 
-static std::optional<UnsafeScopeInfo::ScopeID>
-getUnsafeIntrinicScopeID(const Instruction &I) {
-  const IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I);
-  if (!II)
-    return std::nullopt;
-  switch (II->getIntrinsicID()) {
-  case Intrinsic::unsafe_enter:
-  case Intrinsic::unsafe_exit:
-  case Intrinsic::unsafe_in:
-  case Intrinsic::unsafe_out: {
-    auto *ScopeVal = II->getOperand(II->getNumOperands() - 1);
-    return cast<ConstantInt>(ScopeVal)->getLimitedValue();
-  }
-  default:
-    return std::nullopt;
-  }
-}
-
 //===----------------------------------------------------------------------===//
 // UnsafeScopeAnalysis (new pass manager)
 //===----------------------------------------------------------------------===//

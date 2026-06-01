@@ -1395,107 +1395,10 @@ def ARITH_FENCE : StandardPseudoInstruction {
   let isMeta = true;
 }
 
-// SoundSpec scope-region markers (target-independent meta-pseudos).
-//
-// UNSAFE_ENTER/UNSAFE_EXIT: scope-boundary markers. `hasSideEffects = true`
-// keeps them from being DCE'd; `isMeta = true` strips them at AsmPrinter.
-def UNSAFE_ENTER : StandardPseudoInstruction {
-  let OutOperandList = (outs);
-  let InOperandList = (ins i32imm:$scope);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
-def UNSAFE_EXIT : StandardPseudoInstruction {
-  let OutOperandList = (outs);
-  let InOperandList = (ins i32imm:$scope);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
-
-// UNSAFE_IN/UNSAFE_OUT: identity passthrough modelled on `ARITH_FENCE`. The
-// `Constraints = "$src = $dst"` tie forces regalloc to assign the same
-// physical register to input and output, so AsmPrinter dropping these
-// instructions does not perturb register assignment.
-def UNSAFE_IN : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$src, i32imm:$scope);
-  let AsmString = "";
-  let hasSideEffects = false;
-  let Constraints = "$src = $dst";
-  let isMeta = true;
-}
-def UNSAFE_OUT : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$src, i32imm:$scope);
-  let AsmString = "";
-  let hasSideEffects = false;
-  let Constraints = "$src = $dst";
-  let isMeta = true;
-}
-// UNSAFE_DEP: passthrough identity like UNSAFE_IN/OUT, but the scope id is
-// carried on `!unsafe` metadata rather than as an explicit operand. The
-// `$depval` operand is a runtime i32 register value (SoundSpec dependency
-// tag) — kept as a register use so it cannot be DCE'd.
-def UNSAFE_DEP : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$src, unknown:$depval);
-  let AsmString = "";
-  let hasSideEffects = false;
-  let Constraints = "$src = $dst";
-  let isMeta = true;
-}
-
-// UNSAFE_OPEN/UNSAFE_CLOSE: SoundSpec speculation-window barriers. Modelled
-// as full memory barriers (`mayLoad`/`mayStore`/`hasSideEffects`) so the MIR
-// pipeline cannot reorder anything across them, NOT speculatable, and
-// `isConvergent = true` so they cannot be made control-dependent. The operand
-// of UNSAFE_OPEN and the result of UNSAFE_CLOSE are runtime i32 register
-// values (typed `unknown` here so the pseudo is target-independent and picks
-// up whatever GPR class the lowering chooses). `isMeta = true` strips them at
-// AsmPrinter, matching the rest of the SoundSpec scope-region markers; the
-// actual machine-code emission belongs to a later target-specific pass.
-def UNSAFE_OPEN : StandardPseudoInstruction {
-  let OutOperandList = (outs);
-  let InOperandList = (ins unknown:$arg);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let mayLoad = true;
-  let mayStore = true;
-  let isConvergent = true;
-  let isMeta = true;
-}
-def UNSAFE_CLOSE : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let mayLoad = true;
-  let mayStore = true;
-  let isConvergent = true;
-  let isMeta = true;
-}
-
-// SoundSpec shadow-token meta pseudos. GEN/DEP tie `$dst` to the first input
-// register so register allocation reuses the same physical register and no
-// spurious code is left behind once they're stripped. XMIT has no def, just
-// a use plus `hasSideEffects` so DCE can't kill it. `isMeta = true` on all
-// three means AsmPrinter emits no bytes for them.
-def UNSAFE_SHADOW_GEN : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$scope);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
-def UNSAFE_SHADOW_XMIT : StandardPseudoInstruction {
-  let OutOperandList = (outs);
-  let InOperandList = (ins unknown:$x);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
+// SoundSpec shadow-token meta pseudo. UNSAFE_SHADOW_EMBED ties `$dst` to the
+// first input register so register allocation reuses the same physical
+// register and no spurious code is left behind once it's stripped.
+// `isMeta = true` means AsmPrinter emits no bytes for it.
 // Polymorphic passthrough: $val (any type) gets returned as $dst (same
 // type). $tok is the i32 shadow token kept as an extra use. The
 // `$val = $dst` tie is safe because both share the same type.
@@ -1507,17 +1410,6 @@ def UNSAFE_SHADOW_EMBED : StandardPseudoInstruction {
   let Constraints = "$val = $dst";
   let isMeta = true;
 }
-// Side-effecting shadow-memory store. Two i32 register inputs (address
-// and data), no def, stripped at AsmPrinter like the other shadow.*
-// meta pseudos.
-def UNSAFE_SHADOW_STORE : StandardPseudoInstruction {
-  let OutOperandList = (outs);
-  let InOperandList = (ins unknown:$shadowaddr, unknown:$shadowdata);
-  let AsmString = "";
-  let hasSideEffects = true;
-  let isMeta = true;
-}
-
 def STACKMAP : StandardPseudoInstruction {
   let OutOperandList = (outs);
   let InOperandList = (ins i64imm:$id, i32imm:$nbytes, variable_ops);

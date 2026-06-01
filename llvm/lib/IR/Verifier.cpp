@@ -7762,21 +7762,6 @@ void Verifier::verifyNoAliasScopeDecl() {
   }
 }
 
-static bool isUnsafeEnterExitInOut(const Instruction &I) {
-  auto *II = dyn_cast<IntrinsicInst>(&I);
-  if (!II)
-    return false;
-  switch (II->getIntrinsicID()) {
-  default:
-    return false;
-  case Intrinsic::unsafe_enter:
-  case Intrinsic::unsafe_exit:
-  case Intrinsic::unsafe_in:
-  case Intrinsic::unsafe_out:
-    return true;
-  }
-}
-
 void Verifier::verifyUnsafeFunction(const Function &F) {
   assert(F.hasFnAttribute(Attribute::Unsafe));
 

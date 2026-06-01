@@ -1580,90 +1580,30 @@ def int_codeview_annotation : DefaultAttrsIntrinsic<[], [llvm_metadata_ty],
 
 //===---------------------- SoundSpec Unsafe Region Intrinsics ------------===//
 //
-// `llvm.unsafe.in.<T>(<T> value, i32 imm scope_id)` and
-// `llvm.unsafe.out.<T>(<T> value, i32 imm scope_id)` are pure
-// identity-passthrough scope-boundary markers used by SoundSpec to
-// delimit speculation-unsafe regions in the IR. Each call returns its
-// first argument unchanged; semantics: no memory access, no side
-// effects, freely speculatable (hoistable). The second argument is an
-// immediate scope ID (same `u32` as rustc's MIR `unsafe_scope` /
-// `!unsafe !N` MDNode payload).
-def int_unsafe_in : PureIntrinsic<
-    [llvm_any_ty],
-    [LLVMMatchType<0>, llvm_i32_ty],
-    [ImmArg<ArgIndex<1>>]>;
-
-def int_unsafe_out : PureIntrinsic<
-    [llvm_any_ty],
-    [LLVMMatchType<0>, llvm_i32_ty],
-    [ImmArg<ArgIndex<1>>]>;
-
-// `llvm.unsafe.enter(i32 imm scope_id)` and
-// `llvm.unsafe.exit(i32 imm scope_id)` mark the dynamic entry / exit
-// of a SoundSpec unsafe region. Unlike the passthrough markers
-// (`llvm.unsafe.in`/`out`/`dep`), these have no return value and are
-// modelled as side-effecting via `IntrInaccessibleMemOnly` so they
-// survive DCE. They are `Convergent` so they cannot be moved across
-// control flow that's not uniformly executed (matters for GPU/SIMD).
-// Ordinary loads/stores may still be reordered across them (we did
-// not opt into a full memory-barrier model).
-def int_unsafe_enter : DefaultAttrsIntrinsic<
-    [],
-    [llvm_i32_ty],
-    [IntrInaccessibleMemOnly, IntrConvergent, ImmArg<ArgIndex<0>>]>;
-
-def int_unsafe_exit : DefaultAttrsIntrinsic<
-    [],
-    [llvm_i32_ty],
-    [IntrInaccessibleMemOnly, IntrConvergent, ImmArg<ArgIndex<0>>]>;
-
-// `llvm.unsafe.dep.<T>(<T> value, i32 depval)` is a pure
-// identity-passthrough on its first argument (return type matches
-// `value`'s type). The second argument is a runtime i32 register
-// value carrying SoundSpec dependency-tag information; it does not
-// affect the returned value but the codegen pseudo keeps it as a
-// register use so it cannot be DCE'd. The unsafe-scope list lives
-// on the call's `!unsafe` metadata, not in an arg.
-def int_unsafe_dep : PureIntrinsic<
-    [llvm_any_ty],
-    [LLVMMatchType<0>, llvm_i32_ty],
-    []>;
-
-// `llvm.unsafe.open(i32 %arg)` and `i32 llvm.unsafe.close()` are
-// SoundSpec barrier intrinsics modelling speculation-window
-// open/close pairs. Unlike `llvm.unsafe.enter`/`exit`, the operand of
-// `open` and the result of `close` are runtime values (not
-// immediates), so they appear in registers. They are deliberately
-// modelled as fully side-effecting with unknown memory read+write
-// effects (no `Intr*Mem` property) so the optimizer cannot reorder,
-// hoist, sink, fuse, or speculate any memory op past them.
-// `IntrConvergent` further prevents the calls themselves from being
-// made control-dependent on additional values. They are NOT
-// `IntrSpeculatable`. We use `Intrinsic` (rather than
-// `DefaultAttrsIntrinsic`) to avoid the `nosync`/`nofree`/
-// `nocallback`/`willreturn` defaults that would otherwise weaken the
-// barrier semantics.
-def int_unsafe_open : Intrinsic<
-    [],
-    [llvm_i32_ty],
-    [IntrConvergent]>;
-
-def int_unsafe_close : Intrinsic<
-    [llvm_i32_ty],
-    [],
-    [IntrConvergent]>;
-
-// `void @llvm.unsafe.begin()` marks the beginning of an unsafe scope.
-// `i32 @llvm.unsafe.end()` marks the end of an unsafe scope; result is
-// an opaque token. Both are modeled as full memory barriers — may
-// read/write all memory — so the optimizer cannot reorder ANY load or
-// store across them. NOT speculatable, NOT idempotent.
-def int_unsafe_begin : DefaultAttrsIntrinsic<[], [], []>;
-def int_unsafe_end : DefaultAttrsIntrinsic<[llvm_i32_ty], [], []>;
+// `void @llvm.unsafe.begin(i32)` / `i32 @llvm.unsafe.end()` mark the begin
+// and end of an unsafe scope (end's result is an opaque token).
+// `void @llvm.safe.begin()` / `void @llvm.safe.end()` mark the begin and end
+// of a safe scope.
+//
+// All four are modeled as `read any memory, write only inaccessible memory`:
+// `IntrWrite<[InaccessibleMem]>` keeps writes restricted to compiler-
+// invisible scope-stack state (so they survive DCE without polluting
+// program-visible memory), while leaving the default unknown-read effect
+// in place so the optimizer cannot speculate, CSE, or reorder ordinary
+// loads across them. NOT speculatable, NOT idempotent (begin/end twice
+// differs from once).
+def int_unsafe_begin : DefaultAttrsIntrinsic<[], [llvm_i32_ty],
+    [IntrWrite<[InaccessibleMem]>]>;
+def int_unsafe_end   : DefaultAttrsIntrinsic<[llvm_i32_ty], [],
+    [IntrWrite<[InaccessibleMem]>]>;
+def int_safe_begin   : DefaultAttrsIntrinsic<[], [],
+    [IntrWrite<[InaccessibleMem]>]>;
+def int_safe_end     : DefaultAttrsIntrinsic<[], [],
+    [IntrWrite<[InaccessibleMem]>]>;
 
 // SoundSpec shadow-token intrinsics. Used to give producers without a
 // natural data input (e.g. `alloca !unsafe`) something for
-// `llvm.unsafe.dep` to thread through.
+// `llvm.unsafe.shadow.dep` to thread through.
 //
 // `i32 llvm.unsafe.shadow.gen(metadata %scope)` materializes a fresh
 // shadow token tagged with a distinct scope-identity MDNode. The MDNode
@@ -1719,16 +1659,6 @@ def int_unsafe_shadow_xmit : DefaultAttrsIntrinsic<
     [],
     [llvm_i32_ty],
     [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
-
-// `void llvm.unsafe.shadow.store(i32 %shadowaddr, i32 %shadowdata)`
-// is a side-effecting shadow-memory store. Like `shadow.xmit`,
-// `IntrInaccessibleMemOnly` gives it the minimum side effects needed
-// to survive DCE without forcing a full memory barrier (ordinary
-// loads/stores may still be reordered around it). NOT speculatable.
-def int_unsafe_shadow_store : DefaultAttrsIntrinsic<
-    [],
-    [llvm_i32_ty, llvm_i32_ty],
-    [IntrInaccessibleMemOnly]>;
 
 // `void llvm.unsafe.shadow.tie(i32 %gentok, i32 %deptok)` ties a
 // shadow gen token to a dep token. `IntrWriteMem` +

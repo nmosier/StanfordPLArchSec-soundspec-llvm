@@ -129,32 +129,11 @@ HANDLE_TARGET_OPCODE(BUNDLE)
 HANDLE_TARGET_OPCODE(LIFETIME_START)
 HANDLE_TARGET_OPCODE(LIFETIME_END)
 
-/// SoundSpec scope-region markers. UNSAFE_ENTER/EXIT take an `i32imm` scope
-/// id and have side effects (must survive DCE). UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP
-/// take an arbitrary value plus an `i32imm` scope id; output register is tied
-/// to input via Constraints, so AsmPrinter strips them with no codegen change.
-HANDLE_TARGET_OPCODE(UNSAFE_ENTER)
-HANDLE_TARGET_OPCODE(UNSAFE_EXIT)
-HANDLE_TARGET_OPCODE(UNSAFE_IN)
-HANDLE_TARGET_OPCODE(UNSAFE_OUT)
-HANDLE_TARGET_OPCODE(UNSAFE_DEP)
-
-/// SoundSpec speculation-window barriers. UNSAFE_OPEN takes one i32 register
-/// operand; UNSAFE_CLOSE produces one i32 register result. Both are modelled
-/// as full memory barriers (mayLoad / mayStore / hasSideEffects) so the MIR
-/// pipeline cannot reorder anything across them.
-HANDLE_TARGET_OPCODE(UNSAFE_OPEN)
-HANDLE_TARGET_OPCODE(UNSAFE_CLOSE)
-
-/// SoundSpec shadow-token meta pseudos. UNSAFE_SHADOW_GEN/DEP are pure
-/// passthroughs with `$dst` tied to the first input (so register allocation
-/// reuses that register). UNSAFE_SHADOW_XMIT is the chain-carrying sink with
-/// side effects (must survive DCE). All three are `isMeta = true` and
-/// stripped at AsmPrinter — they emit no code.
-HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_GEN)
-HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_XMIT)
+/// SoundSpec shadow-token meta pseudo. UNSAFE_SHADOW_EMBED is a pure
+/// passthrough with `$dst` tied to the first input (so register allocation
+/// reuses that register). `isMeta = true` and stripped at AsmPrinter — it
+/// emits no code.
 HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_EMBED)
-HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_STORE)
 
 /// Pseudo probe
 HANDLE_TARGET_OPCODE(PSEUDO_PROBE)

@@ -284,40 +284,52 @@ def KCFI_CHECK : PseudoI<
 //===----------------------------------------------------------------------===//
 // Pseudo instructions used by SoundSpec CFI.
 //
-// SOUNDSPEC_CFI_DEST is a CFI landing pad that lowers to the 7-byte encoding
-//   0F 01 AE <imm32>
-// SOUNDSPEC_CFI_SRC is the corresponding call-site marker that lowers to
-//   0F 01 AF <imm32>
-// where <imm32> is the SoundSpec CFI label.
+// SOUNDSPEC_CFI_SRC  is the call-site marker, lowered to the 7-byte encoding
+//   0F 1E 80 <imm32>
+// SOUNDSPEC_CFI_DEST is the landing-pad marker, lowered to
+//   0F 1E 81 <imm32>
+// where <imm32> is the SoundSpec CFI label. The raw bytes are emitted by
+// `emitSoundSpecCFIMarker` in X86MCInstLower.cpp; a custom decoder hook in
+// X86Disassembler.cpp recognizes the same pattern so llvm-objdump prints the
+// AsmStrings below instead of `(bad)`.
 //===----------------------------------------------------------------------===//
 def SOUNDSPEC_CFI_DEST : PseudoI<
   (outs), (ins i32imm:$id), []>, Sched<[]> {
-  let hasSideEffects = 0;
+  // hasSideEffects = 1 keeps the marker locked at the function entry — no
+  // later MIR pass may reorder it past the prologue or DCE it (no def, no
+  // side effects would otherwise let DeadMachineInstructionElim drop it).
+  let hasSideEffects = 1;
   let mayLoad = 0;
   let mayStore = 0;
+  let AsmString = "soundspec_cfi_dest\t$id";
 }
 
 def SOUNDSPEC_CFI_SRC : PseudoI<
   (outs), (ins i32imm:$id), []>, Sched<[]> {
-  let hasSideEffects = 0;
+  // hasSideEffects = 1 keeps the marker locked directly before the indirect
+  // call — mirrors stock KCFI_CHECK's modeling. Without this, the pseudo
+  // could be reordered or DCE'd between EmitKCFICheck and AsmPrinter.
+  let hasSideEffects = 1;
   let mayLoad = 0;
   let mayStore = 0;
+  let AsmString = "soundspec_cfi_src\t$id";
 }
 
-// UNSAFE_{BEGIN,END,WAIT} share a SoundSpec sub-table at TB opcode 0x19,
-// distinguished by the reg field of a mod=11 ModR/M byte:
+// UNSAFE_{BEGIN,END} and SAFE_{BEGIN,END} share a SoundSpec sub-table at TB
+// opcode 0x19, distinguished by the ModR/M byte (all mod=11):
 //
-//   /0  ->  UNSAFE_BEGIN              0F 19 C0           (no operands)
-//   /1  ->  UNSAFE_END    $dst        0F 19 11.001.ddd   (ddd = $dst i32)
-//   /2  ->  UNSAFE_WAIT   $tok        0F 19 11.010.sss   (sss = $tok i32)
+//   /0 r/m=sss ->  UNSAFE_BEGIN  $src   0F 19 11.000.sss   (sss = $src i32)
+//   /1 r/m=ddd ->  UNSAFE_END    $dst   0F 19 11.001.ddd   (ddd = $dst i32)
+//   /3 r/m=0   ->  SAFE_BEGIN           0F 19 11.011.000   (= 0F 19 D8)
+//   /3 r/m=1   ->  SAFE_END             0F 19 11.011.001   (= 0F 19 D9)
 //
 // `0F 19` (along with 0F 1A–0F 1F) sits in the multi-byte-NOP/PREFETCH
 // reserved-hint region. Mod=11 forms of these are #UD on current x86,
 // so SoundSpec silicon can repurpose them. We *do* expose these to the
 // disassembler/asm-parser so `llvm-objdump` / `lldb` render SoundSpec
 // instructions with their real mnemonics instead of as generic NOPs.
-def UNSAFE_BEGIN : I<0x19, MRM_C0, (outs), (ins),
-                     "unsafe_begin", []>, TB, Sched<[]> {
+def UNSAFE_BEGIN : I<0x19, MRM0r, (outs), (ins GR32:$src),
+                     "unsafe_begin\t$src", []>, TB, Sched<[]> {
   let hasSideEffects = 1;
   let mayLoad = 0;
   let mayStore = 0;
@@ -328,13 +340,18 @@ def UNSAFE_END : I<0x19, MRM1r, (outs GR32:$dst), (ins),
   let mayLoad = 0;
   let mayStore = 0;
 }
-def UNSAFE_WAIT : I<0x19, MRM2r, (outs), (ins GR32:$tok),
-                    "unsafe_wait\t$tok", []>, TB, Sched<[]> {
+def SAFE_BEGIN : I<0x19, MRM_D8, (outs), (ins),
+                   "safe_begin", []>, TB, Sched<[]> {
   let hasSideEffects = 1;
   let mayLoad = 0;
   let mayStore = 0;
 }
-
+def SAFE_END : I<0x19, MRM_D9, (outs), (ins),
+                 "safe_end", []>, TB, Sched<[]> {
+  let hasSideEffects = 1;
+  let mayLoad = 0;
+  let mayStore = 0;
+}
 // SOUNDSPEC_PROTECT_GR{32,64} mark a GPR data value as data-dependent on
 // a dep token. Encoded as `0F 1E 11.ddd.sss` (GR32) or
 // `REX.W 0F 1E 11.ddd.sss` (GR64) — TB prefix, opcode 0x1E, MRMSrcReg
@@ -374,6 +391,20 @@ let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in {
   def UNSAFE_ARG_GR64 : RI<0x1D, MRMSrcReg, (outs GR64:$dst), (ins GR64:$src),
                            "unsafe_arg\t{$src, $dst|$dst, $src}",
                            []>, TB, Sched<[]>;
+}
+
+// UNSAFE_ARG_LFENCE is the fail-safe carrier for `llvm.unsafe.shadow.arg` of a
+// value whose register class has no `unsafe_arg` form (anything but GR32/GR64
+// — XMM, GR8/16, etc.). It produces the i32 shadow token, so it survives as a
+// real def consumed by downstream dep chains, and is lowered post-RA by
+// X86SoundSpecMIROptimizer into an `LFENCE` (the actual speculation barrier)
+// plus a zero token. `hasSideEffects` keeps it from being CSE'd/DCE'd; do NOT
+// set mayLoad/mayStore — that makes the DAG scheduler treat it as a load and
+// index load-address operands it doesn't have (ClusterNeighboringLoads). The
+// real barrier semantics come from the lowered LFENCE, and the token's data
+// dependency already pins this node before its uses.
+def UNSAFE_ARG_LFENCE : PseudoI<(outs GR32:$tok), (ins), []>, Sched<[]> {
+  let hasSideEffects = 1;
 }
 
 //===----------------------------------------------------------------------===//

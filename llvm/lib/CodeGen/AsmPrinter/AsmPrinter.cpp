@@ -2130,63 +2130,16 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::MEMBARRIER:
         OutStreamer->emitRawComment("MEMBARRIER");
         break;
-      case TargetOpcode::UNSAFE_ENTER:
-      case TargetOpcode::UNSAFE_EXIT:
-      case TargetOpcode::UNSAFE_IN:
-      case TargetOpcode::UNSAFE_OUT:
-      case TargetOpcode::UNSAFE_DEP:
-      case TargetOpcode::UNSAFE_OPEN:
-      case TargetOpcode::UNSAFE_CLOSE:
-      case TargetOpcode::UNSAFE_SHADOW_GEN:
-      case TargetOpcode::UNSAFE_SHADOW_XMIT:
       case TargetOpcode::UNSAFE_SHADOW_EMBED:
-      case TargetOpcode::UNSAFE_SHADOW_STORE:
-        // SoundSpec scope-region markers: purely meta. Stripped at
-        // AsmPrinter (emit nothing). For UNSAFE_IN/UNSAFE_OUT/UNSAFE_DEP
-        // and UNSAFE_SHADOW_GEN/DEP, the `Constraints = "$src = $dst"`
-        // (or `$id`/`$x = $dst`) tie at the .td level means input and
-        // output share a physical register, so dropping them does not
-        // perturb register assignment. UNSAFE_OPEN/CLOSE are barrier
-        // pseudos; their actual lowering to machine code is expected to
-        // happen in a target-specific pass before AsmPrinter.
-        if (isVerbose()) {
-          switch (MI.getOpcode()) {
-          case TargetOpcode::UNSAFE_ENTER:
-            OutStreamer->emitRawComment("UNSAFE_ENTER");
-            break;
-          case TargetOpcode::UNSAFE_EXIT:
-            OutStreamer->emitRawComment("UNSAFE_EXIT");
-            break;
-          case TargetOpcode::UNSAFE_IN:
-            OutStreamer->emitRawComment("UNSAFE_IN");
-            break;
-          case TargetOpcode::UNSAFE_OUT:
-            OutStreamer->emitRawComment("UNSAFE_OUT");
-            break;
-          case TargetOpcode::UNSAFE_DEP:
-            OutStreamer->emitRawComment("UNSAFE_DEP");
-            break;
-          case TargetOpcode::UNSAFE_OPEN:
-            OutStreamer->emitRawComment("UNSAFE_OPEN");
-            break;
-          case TargetOpcode::UNSAFE_CLOSE:
-            OutStreamer->emitRawComment("UNSAFE_CLOSE");
-            break;
-          case TargetOpcode::UNSAFE_SHADOW_GEN:
-            OutStreamer->emitRawComment("UNSAFE_SHADOW_GEN");
-            break;
-          case TargetOpcode::UNSAFE_SHADOW_XMIT:
-            OutStreamer->emitRawComment("UNSAFE_SHADOW_XMIT");
-            break;
-          case TargetOpcode::UNSAFE_SHADOW_EMBED:
-            OutStreamer->emitRawComment("UNSAFE_SHADOW_EMBED");
-            break;
-          case TargetOpcode::UNSAFE_SHADOW_STORE:
-            OutStreamer->emitRawComment("UNSAFE_SHADOW_STORE");
-            break;
-          }
-        }
-        break;
+        // UNSAFE_SHADOW_EMBED is an abstract meta pseudo emitted by X86 ISel
+        // that X86SoundSpecMIROptimizer (addPreEmitPass2) MUST lower into a
+        // concrete SOUNDSPEC_PROTECT_GR{32,64} or LFENCE before AsmPrinter.
+        // Reaching here means the optimizer missed one; silently stripping
+        // would drop SoundSpec protection without anyone noticing, so fail
+        // loudly instead.
+        llvm_unreachable(
+            "UNSAFE_SHADOW_EMBED meta pseudo reached AsmPrinter — "
+            "X86SoundSpecMIROptimizer should have lowered it");
       case TargetOpcode::JUMP_TABLE_DEBUG_INFO:
         // This instruction is only used to note jump table debug info, it's
         // purely meta information.

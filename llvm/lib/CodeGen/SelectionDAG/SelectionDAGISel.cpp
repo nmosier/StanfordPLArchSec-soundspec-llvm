@@ -2588,61 +2588,6 @@ void SelectionDAGISel::Select_MEMBARRIER(SDNode *N) {
                        N->getOperand(0));
 }
 
-void SelectionDAGISel::Select_UNSAFE_IN(SDNode *N) {
-  // SoundSpec: passthrough pseudo with tied `$src = $dst`. Operand 0 is the
-  // value, operand 1 is the TargetConstant scope id (already in immediate
-  // form thanks to `DAG.getTargetConstant` in the DAG builder).
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_IN, N->getValueType(0),
-                       {N->getOperand(0), N->getOperand(1)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_OUT(SDNode *N) {
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_OUT, N->getValueType(0),
-                       {N->getOperand(0), N->getOperand(1)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_DEP(SDNode *N) {
-  // SoundSpec: passthrough pseudo with tied `$src = $dst`. Operand 0 is the
-  // value, operand 1 is the runtime i32 dependency-tag register value. The
-  // scope list lives on `!unsafe` metadata attached to the corresponding
-  // call/MI, not as an explicit operand.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_DEP, N->getValueType(0),
-                       {N->getOperand(0), N->getOperand(1)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_SHADOW_GEN(SDNode *N) {
-  // SoundSpec shadow-token producer: chain-carrying side-effecting pseudo
-  // with no tied input. The ISD node has chain at operand 0, scope
-  // (TargetConstant) at operand 1; results are {i32, chain}.
-  // `InstrEmitter::countOperands` requires the chain to be the LAST
-  // operand of the MachineSDNode, so reorder {scope, chain} when handing
-  // off to SelectNodeTo.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_GEN,
-                       N->getValueType(0), N->getValueType(1),
-                       {N->getOperand(1), N->getOperand(0)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_SHADOW_XMIT(SDNode *N) {
-  // SoundSpec shadow-token sink: chain-carrying pseudo with a single i32
-  // register use. The ISD node has chain at operand 0 and the token at
-  // operand 1, but `InstrEmitter::countOperands` requires the chain to be
-  // the LAST operand of the MachineSDNode (it sniffs MVT::Other at the
-  // tail). Swap them when handing off to SelectNodeTo.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_XMIT, N->getValueType(0),
-                       {N->getOperand(1), N->getOperand(0)});
-}
-
-void SelectionDAGISel::Select_UNSAFE_SHADOW_STORE(SDNode *N) {
-  // SoundSpec side-effecting shadow-memory store: chain-carrying pseudo
-  // with two i32 register uses (addr + data). ISD operand order is
-  // {chain, addr, data}; reorder to {addr, data, chain} for the
-  // MachineSDNode so `InstrEmitter::countOperands` sees the chain at
-  // the tail.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_STORE,
-                       N->getValueType(0),
-                       {N->getOperand(1), N->getOperand(2), N->getOperand(0)});
-}
-
 void SelectionDAGISel::Select_UNSAFE_SHADOW_EMBED(SDNode *N) {
   // SoundSpec passthrough: tied `$val = $dst` (both share operand 0's
   // type); `$tok` is an extra i32 register use kept alive but not tied.
@@ -3389,10 +3334,6 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
   case ISD::LIFETIME_END:
   case ISD::PSEUDO_PROBE:
   case ISD::DEACTIVATION_SYMBOL:
-  case ISD::UNSAFE_ENTER:
-  case ISD::UNSAFE_EXIT:
-  case ISD::UNSAFE_OPEN:
-  case ISD::UNSAFE_CLOSE:
     NodeToMatch->setNodeId(-1); // Mark selected.
     return;
   case ISD::AssertSext:
@@ -3430,24 +3371,6 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
     return;
   case ISD::MEMBARRIER:
     Select_MEMBARRIER(NodeToMatch);
-    return;
-  case ISD::UNSAFE_IN:
-    Select_UNSAFE_IN(NodeToMatch);
-    return;
-  case ISD::UNSAFE_OUT:
-    Select_UNSAFE_OUT(NodeToMatch);
-    return;
-  case ISD::UNSAFE_DEP:
-    Select_UNSAFE_DEP(NodeToMatch);
-    return;
-  case ISD::UNSAFE_SHADOW_GEN:
-    Select_UNSAFE_SHADOW_GEN(NodeToMatch);
-    return;
-  case ISD::UNSAFE_SHADOW_XMIT:
-    Select_UNSAFE_SHADOW_XMIT(NodeToMatch);
-    return;
-  case ISD::UNSAFE_SHADOW_STORE:
-    Select_UNSAFE_SHADOW_STORE(NodeToMatch);
     return;
   case ISD::STACKMAP:
     Select_STACKMAP(NodeToMatch);

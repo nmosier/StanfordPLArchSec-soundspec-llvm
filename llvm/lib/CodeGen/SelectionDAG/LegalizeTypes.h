@@ -337,7 +337,7 @@ private:
   SDValue PromoteIntRes_STRICT_FP_TO_FP16_BF16(SDNode *N);
   SDValue PromoteIntRes_XRINT(SDNode *N);
   SDValue PromoteIntRes_FREEZE(SDNode *N);
-  SDValue PromoteIntRes_UNSAFE_IN_OUT(SDNode *N);
+  SDValue PromoteIntRes_UNSAFE_SHADOW_EMBED(SDNode *N);
   SDValue PromoteIntRes_INT_EXTEND(SDNode *N);
   SDValue PromoteIntRes_LOAD(LoadSDNode *N);
   SDValue PromoteIntRes_VP_LOAD(VPLoadSDNode *N);
@@ -1028,6 +1028,7 @@ private:
   SDValue SplitVecOp_EXTRACT_VECTOR_ELT(SDNode *N);
   SDValue SplitVecOp_ExtVecInRegOp(SDNode *N);
   SDValue SplitVecOp_FAKE_USE(SDNode *N);
+  SDValue SplitVecOp_UNSAFE_SHADOW_ARG(SDNode *N);
   SDValue SplitVecOp_STORE(StoreSDNode *N, unsigned OpNo);
   SDValue SplitVecOp_VP_STORE(VPStoreSDNode *N, unsigned OpNo);
   SDValue SplitVecOp_VP_STRIDED_STORE(VPStridedStoreSDNode *N, unsigned OpNo);
@@ -1142,6 +1143,7 @@ private:
   SDValue WidenVecOp_EXTRACT_SUBVECTOR(SDNode *N);
   SDValue WidenVecOp_EXTEND_VECTOR_INREG(SDNode *N);
   SDValue WidenVecOp_FAKE_USE(SDNode *N);
+  SDValue WidenVecOp_UNSAFE_SHADOW_ARG(SDNode *N);
   SDValue WidenVecOp_STORE(SDNode* N);
   SDValue WidenVecOp_VP_STORE(SDNode *N, unsigned OpNo);
   SDValue WidenVecOp_VP_STRIDED_STORE(SDNode *N, unsigned OpNo);
@@ -1230,7 +1232,7 @@ private:
                              SDValue &Lo, SDValue &Hi);
   void SplitVecRes_AssertZext  (SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_ARITH_FENCE (SDNode *N, SDValue &Lo, SDValue &Hi);
-  void SplitRes_UNSAFE_IN_OUT(SDNode *N, SDValue &Lo, SDValue &Hi);
+  void SplitRes_UNSAFE_SHADOW_EMBED(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_Select      (SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_SELECT_CC   (SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitRes_UNDEF       (SDNode *N, SDValue &Lo, SDValue &Hi);

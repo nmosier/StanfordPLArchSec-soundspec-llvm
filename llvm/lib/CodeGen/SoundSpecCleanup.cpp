@@ -53,6 +53,7 @@
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 #include "llvm/Transforms/Utils/SoundSpecOptimizer.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
+#include <algorithm>
 
 #define DEBUG_TYPE "soundspec-cleanup"
 
@@ -121,12 +122,15 @@ void combineScopes(Function &F, const SmallSet<Metadata *, 4> &IDSet) {
   }
 }
 
-void createUnsafeBegin(Instruction *I, Metadata *ID) {
-  auto &Ctx = I->getContext();
-  assert(I && (!isa<PHINode, AllocaInst>(I)));
-  IRBuilder<> IRB(I);
-  auto *Begin = IRB.CreateIntrinsic(Intrinsic::unsafe_begin, {});
+void createUnsafeBegin(IRBuilderBase &IRB, Metadata *ID, Value *Dep) {
+  auto &Ctx = IRB.getContext();
+  auto *Begin = IRB.CreateIntrinsic(Intrinsic::unsafe_begin, {IRB.getInt32(0)});
   Begin->setMetadata(LLVMContext::MD_unsafe, unsafe::getScopeSet(Ctx, {ID}));
+}
+
+void createUnsafeBegin(Instruction *I, Metadata *ID, Value *Dep) {
+  IRBuilder<> IRB(I);
+  createUnsafeBegin(IRB, ID, Dep);
 }
 
 CallInst *createUnsafeEnd(Instruction *I, Metadata *ID) {
@@ -239,9 +243,12 @@ using InstructionPred = function_ref<bool(Instruction *)>;
 
 void instrumentUnsafeBegin(Instruction *I, Metadata *ID,
                            InstructionPred InScope) {
+  auto &Ctx = I->getContext();
+  auto *Zero = ConstantInt::get(IntegerType::get(Ctx, 32), 0);
+  
   if (auto *Pred = I->getPrevNode()) {
     if (!InScope(Pred))
-      createUnsafeBegin(I, ID);
+      createUnsafeBegin(I, ID, Zero);
     return;
   }
 
@@ -249,7 +256,7 @@ void instrumentUnsafeBegin(Instruction *I, Metadata *ID,
   auto InScopeB = [&](BasicBlock *B) { return InScope(B->getTerminator()); };
 
   if (none_of(predecessors(B), InScopeB)) {
-    createUnsafeBegin(I, ID);
+    createUnsafeBegin(I, ID, Zero);
     return;
   }
 
@@ -263,7 +270,7 @@ void instrumentUnsafeBegin(Instruction *I, Metadata *ID,
       continue;
     auto *NewB = robustSplitEdge(PredB, B);
     assert(NewB);
-    createUnsafeBegin(NewB->getTerminator(), ID);
+    createUnsafeBegin(NewB->getTerminator(), ID, Zero);
   }
 }
 
@@ -386,13 +393,14 @@ bool runOnUnsafeFunction(Function &F) {
   auto *ID = unsafe::createNewScope(Ctx);
   auto *IDs = unsafe::getScopeSet(Ctx, {ID});
   {
+    // Create deps for args.
     IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
-    IRB.CreateIntrinsic(Intrinsic::unsafe_begin, {});
+    Value *Dep = IRB.getInt32(0);
     for (auto &A : F.args()) {
-      auto *Dep = IRB.CreateUnaryIntrinsic(Intrinsic::unsafe_shadow_arg, &A);
-      // NOTE: Tying to dummy value currently.
-      unsafe::createShadowTie(IRB, IRB.getInt32(0), Dep, IDs);
+      auto *ArgDep = IRB.CreateUnaryIntrinsic(Intrinsic::unsafe_shadow_arg, &A);
+      Dep = getUnsafeShadowDep(IRB, Dep, ArgDep);
     }
+    createUnsafeBegin(IRB, ID, Dep);
   }
 
   for (auto &B : F) {
@@ -502,6 +510,168 @@ static void removeLoadTies(Function &F) {
   }
 }
 
+static void
+promoteShadowTiesToBeginTransferPHIs(BasicBlock &B, SmallSet<Value *, 4> &X,
+                                     BasicBlock *Pred,
+                                     ArrayRef<Instruction *> Scope) {
+  for (auto &I : reverse(make_range(B.begin(), B.getFirstNonPHIIt()))) {
+    if (!is_contained(Scope, &I)) {
+      X.clear();
+      continue;
+    }
+    auto *Phi = cast<PHINode>(&I);
+    if (!X.erase(Phi))
+      continue;
+    auto *V = Phi->getIncomingValueForBlock(Pred);
+    assert(V);
+    X.insert(V);
+  }
+}
+
+static void promoteShadowTiesToBeginTransferBlock(
+    BasicBlock &B, SmallSet<Value *, 4> &X,
+    SmallMapVector<Instruction *, SmallSet<Value *, 4>, 4> &Begins,
+    ArrayRef<Instruction *> Scope) {
+  using namespace llvm::PatternMatch;
+  auto Range = make_range(B.getFirstNonPHIIt(), B.end());
+  for (auto &I : reverse(Range)) {
+    if (!is_contained(Scope, &I)) {
+      X.clear();
+      continue;
+    }
+
+    // Is this @llvm.unsafe.shadow.tie()?
+    // If so, add the tied dep.
+    Value *Dep;
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_tie>(m_Value(),
+                                                            m_Value(Dep)))) {
+      X.insert(Dep);
+      continue;
+    }
+
+    // Is this @llvm.unsafe.shadow.begin()?
+    // If so, clear the deps and skip.
+    // Also, copy out the results.
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_begin>())) {
+      Begins[&I] = X;
+      X.clear();
+      continue;
+    }
+
+    // Otherwise, is the result not a tied dep? If not, skip.
+    if (!X.erase(&I))
+      continue;
+
+    // If it was @llvm.unsafe.shadow.arg(), then add the input I guess.
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_arg>(m_Value(Dep)))) {
+      X.insert(Dep);
+      continue;
+    }
+
+    // Handle on a case-by-case basis.
+    if (isa<CallBase, LoadInst>(&I))
+      continue;
+#if 0
+    if (isa<BinaryOperator, CastInst, SelectInst, CmpInst, ExtractElementInst, ExtractValueInst, GetElementPtrInst, FreezeInst, InsertValueInst, InsertElementInst, LandingPadInst, ShuffleVectorInst>(&I)) {
+      copy(I.operands(), std::inserter(X, X.end()));
+      continue;
+    }
+    errs() << "internal error: unhandled instruction: " << I << "\n";
+    std::abort();
+#else
+    copy(I.operands(), std::inserter(X, X.end()));
+    continue;
+#endif
+  }
+}
+
+static void promoteShadowTiesToBegin(Function &F, UnsafeScope &Extent) {
+  using namespace llvm::PatternMatch;
+
+  using T = SmallSet<Value *, 4>;
+  struct InOut {
+    T In;
+    T Out;
+  };
+  SmallSet<BasicBlock *, 4> Blocks;
+  for (auto *I : Extent.instructions())
+    Blocks.insert(I->getParent());
+  DenseMap<BasicBlock *, InOut> Map;
+  bool Changed;
+  SmallMapVector<Instruction *, T, 4> Begins;
+  auto Snapshot = [] (const InOut &X) {
+    return X.In.size() + X.Out.size();
+  };
+  do {
+    Changed = false;
+    for (auto *B : post_order(&F)) {
+      if (!Blocks.contains(B))
+        continue;
+
+      // Recompute OUT into a local. The Map[Succ] lookups below can insert
+      // new entries and grow the DenseMap, which would invalidate any
+      // reference into it — so don't hold a reference to Map[B] across them.
+      T Out = Map[B].Out;
+      for (auto *Succ : successors(B)) {
+        auto SuccIn = Map[Succ].In;
+        promoteShadowTiesToBeginTransferPHIs(*Succ, SuccIn, B,
+                                             Extent.instructions());
+        copy(SuccIn, std::inserter(Out, Out.end()));
+      }
+
+      // Transfer across block.
+      T In = Out;
+      promoteShadowTiesToBeginTransferBlock(*B, In, Begins,
+                                            Extent.instructions());
+
+      // Commit. Safe to take a reference now: no further inserts follow.
+      auto &X = Map[B];
+      auto OrigSize = Snapshot(X);
+      X.Out = std::move(Out);
+      X.In = std::move(In);
+      Changed |= (OrigSize != Snapshot(X));
+    }
+  } while (Changed);
+
+  // Instrument @llvm.unsafe.begin()s.
+  for (auto &[I, Deps] : Begins) {
+    auto *Begin = dyn_cast<IntrinsicInst>(I);
+    IRBuilder<> IRB(I);
+    Value *Acc = IRB.getInt32(0);
+    for (auto *Dep : Deps) {
+      auto *DepTy = dyn_cast<IntegerType>(Dep->getType());
+      if (!DepTy || DepTy->getIntegerBitWidth() != 32)
+        Dep = IRB.CreateUnaryIntrinsic(Intrinsic::unsafe_shadow_arg, Dep);
+      Acc = getUnsafeShadowDep(IRB, Acc, Dep);
+    }
+    Begin->setArgOperand(0, Acc);
+  }
+
+  // Remove all @llvm.unsafe.shadow.tie()s.
+  for (auto *I : Extent.instructions()) {
+    if (match(I, m_Intrinsic<Intrinsic::unsafe_shadow_tie>())) {
+      I->eraseFromParent();
+    }
+  }
+}
+
+static void insertSafeBeginEnd(Function &F) {
+  IRBuilder<> IRB(F.getContext());
+
+  // @llvm.safe.begin() at function entry.
+  auto &Entry = F.getEntryBlock();
+  IRB.SetInsertPoint(&Entry, Entry.getFirstInsertionPt());
+  IRB.CreateIntrinsic(Intrinsic::safe_begin, {});
+
+  // @llvm.safe.end() at each function exit.
+  for (auto &B : F) {
+    if (!succ_empty(&B))
+      continue;
+    IRB.SetInsertPoint(B.getTerminator());
+    IRB.CreateIntrinsic(Intrinsic::safe_end, {});
+  }
+}
+
 void runOnSafeFunction(Function &F) {
   using namespace llvm::PatternMatch;
 
@@ -517,6 +687,12 @@ void runOnSafeFunction(Function &F) {
   // Optimize unsafe scopes after merging.
   optimizeUnsafeScopes(F);
 
+  // Remove @llvm.unsafe.shadow.tie()s that are rooted to loads in the same
+  // unsafe scope.
+  // We originally added those in case mem2reg ran. Now that we know it won't,
+  // just remove the @llvm.unsafe.shadow.tie().
+  removeLoadTies(F);
+  
   // Insert @llvm.unsafe.begin/llvm.unsafe.end for each scope.
   // Remove @llvm.unsafe.gen, replace with value returned by @llvm.unsafe.end.
   for (Metadata *ID : IDSet) {
@@ -564,6 +740,12 @@ void runOnSafeFunction(Function &F) {
       Gen->replaceAllUsesWith(DummyVal);
       Gen->eraseFromParent();
     }
+
+    // Push @llvm.unsafe.shadow.tie() to @llvm.unsafe.begin() input.
+    // Rebuild the scope first: erasing the Gens above invalidated the
+    // instruction list cached in `Extent`.
+    UnsafeScope FreshExtent(F, ID);
+    promoteShadowTiesToBegin(F, FreshExtent);
   }
 
   // Convert @llvm.unsafe.shadow.xmit() into @llvm.unsafe.shadow.embed(%data,
@@ -616,25 +798,34 @@ void runOnSafeFunction(Function &F) {
     if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
       I.eraseFromParent();
 
-  // Remove @llvm.unsafe.shadow.tie()s that are rooted to loads in the same
-  // unsafe scope.
-  // We originally added those in case mem2reg ran. Now that we know it won't,
-  // just remove the @llvm.unsafe.shadow.tie().
-  removeLoadTies(F);
+
+  // Insert @llvm.safe.begin() and @llvm.safe.end().
+  insertSafeBeginEnd(F);
 
   F.setMetadata("soundspec.final", MDNode::get(Ctx, {}));
 }
 
 void instrumentUnsafeArgs(Function &F) {
+  errs() << "WARNING: not instrumenting dynamic dispatch\n";
+  return;
+
+
+  auto &Ctx = F.getContext();
+  auto *EmptyMD = MDNode::get(Ctx, {});
+
   auto IsUnsafeArg = [](const Argument &A) {
     return A.hasAttribute(Attribute::SoundSpecArgUnsafe);
   };
-  // Tag any soundspec_arg_unsafe
+  // Callee side: if this function declares any `soundspec_arg_unsafe` params,
+  // emit an entry `unsafe_end` (the cross-function close of the scope the
+  // caller opened before the call) and embed each unsafe param with its token.
+  // The end is tagged `!unsafe.end.nocheck` so the intra-function balance
+  // walker exempts it — it has no preceding begin in this function by design.
   if (any_of(F.args(), IsUnsafeArg)) {
-    // emit @llvm.unsafe.end()
     auto *B = &F.getEntryBlock();
     IRBuilder<> IRB(B, B->getFirstInsertionPt());
     auto *End = IRB.CreateIntrinsic(Intrinsic::unsafe_end, {});
+    End->setMetadata("unsafe.end.nocheck", EmptyMD);
     for (auto &A : F.args()) {
       if (!IsUnsafeArg(A))
         continue;
@@ -646,7 +837,11 @@ void instrumentUnsafeArgs(Function &F) {
     }
   }
 
-  // Insert @llvm.unsafe.begin() before virtual method calls.
+  // Caller side: before any call whose arg ops carry `soundspec_arg_unsafe`,
+  // open the cross-function scope with an `unsafe_begin` (closed by the
+  // callee's entry `unsafe_end`). Tagged `!unsafe.begin.nocheck` so the
+  // balance walker exempts it — it has no matching end in this function by
+  // design.
   for (auto &I : instructions(F)) {
     auto *C = dyn_cast<CallBase>(&I);
     if (!C)
@@ -658,7 +853,9 @@ void instrumentUnsafeArgs(Function &F) {
     }
     if (AnyUnsafeArg) {
       IRBuilder<> IRB(C);
-      IRB.CreateIntrinsic(Intrinsic::unsafe_begin, {});
+      auto *Begin =
+          IRB.CreateIntrinsic(Intrinsic::unsafe_begin, {IRB.getInt32(0)});
+      Begin->setMetadata("unsafe.begin.nocheck", EmptyMD);
     }
   }
 }
@@ -716,10 +913,17 @@ static void checkUnsafeBeginEnd(Function &F) {
       // Transfer.
       X.Out = X.In;
       for (auto &I : *B) {
-        if (match(&I, m_Intrinsic<Intrinsic::unsafe_begin>())) {
+        // `!unsafe.begin.nocheck` / `!unsafe.end.nocheck` mark cross-function
+        // begins/ends emitted by `instrumentUnsafeArgs` (the caller-side
+        // begin before a `soundspec_arg_unsafe` call is closed by the
+        // callee's entry `unsafe_end`, and vice versa). They are unbalanced
+        // within a single function by design — skip them here.
+        if (match(&I, m_Intrinsic<Intrinsic::unsafe_begin>()) &&
+            !I.getMetadata("unsafe.begin.nocheck")) {
           assert(X.Out < UINT_MAX && "depth would overflow!");
           ++X.Out;
-        } else if (match(&I, m_Intrinsic<Intrinsic::unsafe_end>())) {
+        } else if (match(&I, m_Intrinsic<Intrinsic::unsafe_end>()) &&
+                   !I.getMetadata("unsafe.end.nocheck")) {
           assert(X.Out > 0 && "mismatched unsafe_end!");
           --X.Out;
         }
@@ -768,6 +972,75 @@ static void doStrip(Function &F) {
   }
 }
 
+static void checkNoTies(Function &F) {
+  using namespace llvm::PatternMatch;
+  for (auto &I : instructions(F)) {
+    if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_tie>())) {
+      errs() << "[soundspec] error: found lingering tie: " << I << "\n";
+      std::abort();
+    }
+  }
+}
+
+static void optimizeBeginEndScopes(BasicBlock &B) {
+  using namespace llvm::PatternMatch;
+
+  // An empty unsafe scope looks like:
+  // @llvm.unsafe.begin(%dep_in)
+  // <no speculation primitives, period>
+  // %dep_out = @llvm.unsafe.end()
+  // ... some users of %dep_out ...
+  auto It = B.begin();
+  auto Last = B.end();
+  while (It != Last) {
+    // Look for a @llvm.unsafe.begin(%dep_in).
+    Value *DepIn = nullptr;
+    It = std::find_if(It, Last, [&DepIn](const Instruction &I) -> bool {
+      return match(&I, m_Intrinsic<Intrinsic::unsafe_begin>(m_Value(DepIn)));
+    });
+    if (It == Last)
+      break;
+    auto BeginIt = It++;
+
+    // Scan until we hit a @llvm.unsafe.end().
+    It = std::find_if(It, Last, [](const Instruction &I) -> bool {
+      return match(&I, m_Intrinsic<Intrinsic::unsafe_end>());
+    });
+    if (It == Last)
+      break;
+    auto EndIt = It++;
+    iterator_range InnerRange(std::next(BeginIt), EndIt);
+
+    // If there are any speculation primitives, abort.
+    if (any_of(InnerRange, [](const Instruction &I) -> bool {
+          return isSpeculationPrimitive(I) || unsafe::isRelevantCall(I);
+        }))
+      continue;
+
+    // IT'S A GO!
+    //
+    // Harden all the transmitters.
+    for (auto &I : InnerRange) {
+      IRBuilder<> IRB(&I);
+      // TODO: Refactor this with the code in runOnSafeFunction() - it does the
+      // same kinda thing.
+      if (!isTransmitter(I))
+        continue;
+      auto *OldOp = getTransmittedOperand(I);
+      auto *NewOp = IRB.CreateBinaryIntrinsic(Intrinsic::unsafe_shadow_embed,
+                                              OldOp, DepIn);
+      I.replaceUsesOfWith(OldOp, NewOp);
+    }
+
+    // Remove llvm.unsafe.begin(%dep_in).
+    BeginIt->eraseFromParent();
+
+    // Replace + remove llvm.unsafe.end().
+    EndIt->replaceAllUsesWith(DepIn);
+    EndIt->eraseFromParent();
+  }
+}
+
 bool runSoundSpecCleanupOnFunction(Function &F) {
   auto &Ctx = F.getContext();
 
@@ -783,12 +1056,15 @@ bool runSoundSpecCleanupOnFunction(Function &F) {
     runOnSafeFunction(F);
   }
 
-  // FIXME: Need to re-enable this!
-#if 0
   instrumentUnsafeArgs(F);
-#endif
+
+  // Prune empty unsafe scopes.
+  for (auto &B : F)
+    optimizeBeginEndScopes(B);
 
   checkUnsafeBeginEnd(F);
+
+  checkNoTies(F);
 
   // If we have any soundspec_arg_unsafe, then we need to
   // insert a @llvm.unsafe.end()

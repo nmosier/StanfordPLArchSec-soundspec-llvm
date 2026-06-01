@@ -1321,46 +1321,6 @@ EmitSpecialNode(SDNode *Node, bool IsClone, bool IsCloned,
     break;
   }
 
-  case ISD::UNSAFE_ENTER:
-  case ISD::UNSAFE_EXIT: {
-    // SoundSpec scope-boundary marker. Operand 0 is the input chain, operand
-    // 1 is a TargetConstant i32 scope id. The resulting MachineInstr has a
-    // single immediate operand (the scope id); no defs, no register uses.
-    unsigned TarOp = (Node->getOpcode() == ISD::UNSAFE_ENTER)
-                         ? TargetOpcode::UNSAFE_ENTER
-                         : TargetOpcode::UNSAFE_EXIT;
-    auto *Scope = cast<ConstantSDNode>(Node->getOperand(1));
-    BuildMI(*MBB, InsertPos, Node->getDebugLoc(), TII->get(TarOp))
-        .addImm(Scope->getZExtValue());
-    break;
-  }
-
-  case ISD::UNSAFE_OPEN: {
-    // SoundSpec speculation-window barrier. Operand 0 is the chain, operand
-    // 1 is the i32 register value being marked. The pseudo takes the value
-    // as a single register use; no defs.
-    Register VReg = getVR(Node->getOperand(1), VRBaseMap);
-    BuildMI(*MBB, InsertPos, Node->getDebugLoc(),
-            TII->get(TargetOpcode::UNSAFE_OPEN))
-        .addReg(VReg);
-    break;
-  }
-  case ISD::UNSAFE_CLOSE: {
-    // SoundSpec speculation-window barrier producing an i32 register. The
-    // pseudo has a single virtual-register def and no uses; allocate a fresh
-    // vreg in the i32 register class chosen by the target.
-    MVT VT = Node->getSimpleValueType(0);
-    const TargetRegisterClass *RC = TLI->getRegClassFor(VT, Node->isDivergent());
-    Register VReg = MRI->createVirtualRegister(RC);
-    BuildMI(*MBB, InsertPos, Node->getDebugLoc(),
-            TII->get(TargetOpcode::UNSAFE_CLOSE), VReg);
-    SDValue Op(Node, 0);
-    bool isNew = VRBaseMap.try_emplace(Op, VReg).second;
-    (void)isNew; // Silence compiler warning.
-    assert(isNew && "Node emitted out of order - early");
-    break;
-  }
-
   case ISD::PSEUDO_PROBE: {
     unsigned TarOp = TargetOpcode::PSEUDO_PROBE;
     auto Guid = cast<PseudoProbeSDNode>(Node)->getGuid();

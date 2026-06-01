@@ -472,13 +472,7 @@ private:
   void Select_FREEZE(SDNode *N);
   void Select_ARITH_FENCE(SDNode *N);
   void Select_MEMBARRIER(SDNode *N);
-  void Select_UNSAFE_IN(SDNode *N);
-  void Select_UNSAFE_OUT(SDNode *N);
-  void Select_UNSAFE_DEP(SDNode *N);
-  void Select_UNSAFE_SHADOW_GEN(SDNode *N);
-  void Select_UNSAFE_SHADOW_XMIT(SDNode *N);
   void Select_UNSAFE_SHADOW_EMBED(SDNode *N);
-  void Select_UNSAFE_SHADOW_STORE(SDNode *N);
 
   void Select_CONVERGENCECTRL_ANCHOR(SDNode *N);
   void Select_CONVERGENCECTRL_ENTRY(SDNode *N);

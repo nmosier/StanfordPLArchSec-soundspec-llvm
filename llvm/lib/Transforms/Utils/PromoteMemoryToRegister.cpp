@@ -69,8 +69,8 @@ bool llvm::isAllocaPromotable(const AllocaInst *AI) {
   // have eliminated all of them before mem2reg runs.
   assert(!AI->getMetadata(LLVMContext::MD_unsafe_init) &&
          "!unsafe.init alloca reached mem2reg; LowerUnsafeInit didn't run?");
-  // `!unsafe` on the alloca is fine — the single-store / single-block /
-  // general paths handle it via llvm.unsafe.dep insertion.
+  // `!unsafe` on the alloca is fine — the rewrite paths propagate the
+  // `!unsafe` scope onto the values and derived checks they materialize.
 
   // Only allow direct and non-volatile loads and stores...
   for (const User *U : AI->users()) {
