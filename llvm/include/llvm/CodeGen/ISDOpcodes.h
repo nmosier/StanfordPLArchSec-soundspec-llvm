@@ -1441,19 +1441,8 @@ enum NodeType {
   /// UNSAFE_SHADOW_EMBED: operand 0 is the arbitrary-typed value, operand
   /// 1 is the i32 shadow token; single result matches operand 0's type.
   /// Identity passthrough on operand 0.
-  /// UNSAFE_BEGIN: marks beginning of unsafe scope. Operand 0 is chain,
-  /// operand 1 is the i32 dep token; single chain result.
-  /// UNSAFE_END: marks end of unsafe scope. Operand 0 is chain; results
-  /// are {i32 token, chain}.
-  /// SAFE_BEGIN / SAFE_END: open / close a SoundSpec safe region. Chain-
-  /// carrying with no value operands or results. Operand 0 is chain; single
-  /// chain result.
   UNSAFE_SHADOW_ARG,
   UNSAFE_SHADOW_EMBED,
-  UNSAFE_BEGIN,
-  UNSAFE_END,
-  SAFE_BEGIN,
-  SAFE_END,
 
   /// FAKE_USE represents a use of the operand but does not do anything.
   /// Its purpose is the extension of the operand's lifetime mainly for

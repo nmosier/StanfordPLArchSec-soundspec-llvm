@@ -1581,11 +1581,12 @@ def int_codeview_annotation : DefaultAttrsIntrinsic<[], [llvm_metadata_ty],
 //===---------------------- SoundSpec Unsafe Region Intrinsics ------------===//
 //
 // `void @llvm.unsafe.begin(i32)` / `i32 @llvm.unsafe.end()` mark the begin
-// and end of an unsafe scope (end's result is an opaque token).
-// `void @llvm.safe.begin()` / `void @llvm.safe.end()` mark the begin and end
-// of a safe scope.
+// and end of an unsafe scope (end's result is an opaque token). These are
+// mid-level markers — SoundSpecCleanup's `convertIntoSoundSpecPushPop`
+// rewrites them into `int_soundspec_push_unsafe` / `int_soundspec_pop`
+// before codegen.
 //
-// All four are modeled as `read any memory, write only inaccessible memory`:
+// Modeled as `read any memory, write only inaccessible memory`:
 // `IntrWrite<[InaccessibleMem]>` keeps writes restricted to compiler-
 // invisible scope-stack state (so they survive DCE without polluting
 // program-visible memory), while leaving the default unknown-read effect
@@ -1596,9 +1597,24 @@ def int_unsafe_begin : DefaultAttrsIntrinsic<[], [llvm_i32_ty],
     [IntrWrite<[InaccessibleMem]>]>;
 def int_unsafe_end   : DefaultAttrsIntrinsic<[llvm_i32_ty], [],
     [IntrWrite<[InaccessibleMem]>]>;
-def int_safe_begin   : DefaultAttrsIntrinsic<[], [],
-    [IntrWrite<[InaccessibleMem]>]>;
-def int_safe_end     : DefaultAttrsIntrinsic<[], [],
+
+// SoundSpec scope-stack ops. All four share the same memory matrix as the
+// begin/end pair above — read arbitrary memory, read/write only inaccessible
+// memory — via `IntrWrite<[InaccessibleMem]>`. Sufficient to keep them from
+// being DCE'd, CSE'd, hoisted, sunk, or reordered with ordinary loads/stores
+// in either direction. NOT speculatable, NOT idempotent.
+//
+//   `i32 llvm.soundspec.push.unsafe(i32 %dep)` — push an unsafe frame.
+//   `i32 llvm.soundspec.push.safe(i32 %dep)`   — push a safe frame.
+//   `i32 llvm.soundspec.pop(i32 %dep)`         — pop the top frame.
+//   `void llvm.soundspec.join()`               — join frames (no token).
+def int_soundspec_push_unsafe : DefaultAttrsIntrinsic<[llvm_i32_ty],
+    [llvm_i32_ty], [IntrWrite<[InaccessibleMem]>]>;
+def int_soundspec_push_safe   : DefaultAttrsIntrinsic<[llvm_i32_ty],
+    [llvm_i32_ty], [IntrWrite<[InaccessibleMem]>]>;
+def int_soundspec_pop         : DefaultAttrsIntrinsic<[llvm_i32_ty],
+    [llvm_i32_ty], [IntrWrite<[InaccessibleMem]>]>;
+def int_soundspec_join        : DefaultAttrsIntrinsic<[], [],
     [IntrWrite<[InaccessibleMem]>]>;
 
 // SoundSpec shadow-token intrinsics. Used to give producers without a

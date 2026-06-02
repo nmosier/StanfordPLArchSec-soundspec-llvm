@@ -655,23 +655,6 @@ static void promoteShadowTiesToBegin(Function &F, UnsafeScope &Extent) {
   }
 }
 
-static void insertSafeBeginEnd(Function &F) {
-  IRBuilder<> IRB(F.getContext());
-
-  // @llvm.safe.begin() at function entry.
-  auto &Entry = F.getEntryBlock();
-  IRB.SetInsertPoint(&Entry, Entry.getFirstInsertionPt());
-  IRB.CreateIntrinsic(Intrinsic::safe_begin, {});
-
-  // @llvm.safe.end() at each function exit.
-  for (auto &B : F) {
-    if (!succ_empty(&B))
-      continue;
-    IRB.SetInsertPoint(B.getTerminator());
-    IRB.CreateIntrinsic(Intrinsic::safe_end, {});
-  }
-}
-
 void runOnSafeFunction(Function &F) {
   using namespace llvm::PatternMatch;
 
@@ -748,6 +731,49 @@ void runOnSafeFunction(Function &F) {
     promoteShadowTiesToBegin(F, FreshExtent);
   }
 
+  // CFG-splitting transforms (critical-edge splitting, jump threading) can
+  // duplicate `shadow.arg(%x)` calls into multiple blocks after GVN/CSE has
+  // run, leaving the XmitDeps map below with multiple SSA values for the
+  // same !soundspec.xmit metadata key. shadow.arg is PureIntrinsic and
+  // deterministic on its operand, so collapse each operand's group to one
+  // canonical call placed where it dominates every use.
+  {
+    DenseMap<Value *, SmallVector<IntrinsicInst *, 4>> ByOperand;
+    for (auto &I : instructions(F)) {
+      auto *II = dyn_cast<IntrinsicInst>(&I);
+      if (!II || II->getIntrinsicID() != Intrinsic::unsafe_shadow_arg)
+        continue;
+      ByOperand[II->getArgOperand(0)].push_back(II);
+    }
+    for (auto &[Operand, Calls] : ByOperand) {
+      if (Calls.size() < 2)
+        continue;
+      // Hoist point: right after the operand's def (or entry-block first
+      // insertion point if the operand is an Argument / Constant). The
+      // operand dominates every use of itself, so this position dominates
+      // every shadow.arg(operand) call in the group.
+      BasicBlock *HoistBB;
+      BasicBlock::iterator HoistPt;
+      if (auto *DefI = dyn_cast<Instruction>(Operand)) {
+        HoistBB = DefI->getParent();
+        HoistPt = std::next(DefI->getIterator());
+        while (HoistPt != HoistBB->end() && isa<PHINode>(*HoistPt))
+          ++HoistPt;
+      } else {
+        HoistBB = &F.getEntryBlock();
+        HoistPt = HoistBB->getFirstInsertionPt();
+      }
+      IntrinsicInst *Canonical = Calls[0];
+      Canonical->moveBefore(*HoistBB, HoistPt);
+      for (auto *C : Calls) {
+        if (C == Canonical)
+          continue;
+        C->replaceAllUsesWith(Canonical);
+        C->eraseFromParent();
+      }
+    }
+  }
+
   // Convert @llvm.unsafe.shadow.xmit() into @llvm.unsafe.shadow.embed(%data,
   // %dep).
   SmallDenseMap<Metadata *, Value *> XmitDeps;
@@ -760,6 +786,12 @@ void runOnSafeFunction(Function &F) {
     auto *Dep = II->getArgOperand(0);
     for (Metadata *XmitID : XmitIDs->operands()) {
       if (auto *OtherDep = XmitDeps.lookup(XmitID)) {
+        if (OtherDep != Dep) {
+          errs() << F << "\n";
+          errs() << "II: " << *II << "\n";
+          errs() << "OtherDep: " << *OtherDep << "\n";
+          errs() << "Dep: " << *Dep << "\n";
+        }
         assert(OtherDep == Dep);
         continue;
       }
@@ -797,10 +829,6 @@ void runOnSafeFunction(Function &F) {
   for (auto &I : make_early_inc_range(instructions(F)))
     if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
       I.eraseFromParent();
-
-
-  // Insert @llvm.safe.begin() and @llvm.safe.end().
-  insertSafeBeginEnd(F);
 
   F.setMetadata("soundspec.final", MDNode::get(Ctx, {}));
 }
@@ -1041,6 +1069,74 @@ static void optimizeBeginEndScopes(BasicBlock &B) {
   }
 }
 
+static void convertIntoSoundSpecPushPop(Function &F) {
+  using namespace llvm::PatternMatch;
+  auto &Ctx = F.getContext();
+  IRBuilder<> IRB(Ctx);
+
+  // Safe functions get wrapped in @llvm.soundspec.push.safe() and
+  // @llvm.soundspec.pop().
+  if (!F.hasFnAttribute(Attribute::Unsafe)) {
+    auto &E = F.getEntryBlock();
+    IRB.SetInsertPoint(&E, E.getFirstInsertionPt());
+    auto *Mask = IRB.CreateIntrinsic(Intrinsic::soundspec_push_safe, {IRB.getInt32(0)});
+    for (auto &B : F) {
+      if (!succ_empty(&B))
+        continue;
+      IRB.SetInsertPoint(B.getTerminator());
+      IRB.CreateIntrinsic(Intrinsic::soundspec_pop, {Mask});
+    }
+  }
+
+  // All functions get their @llvm.unsafe.begin(x)'s rewritten to y =
+  // @llvm.soundspec.push.unsafe(x).
+  SSAUpdater Updater;
+  Updater.Initialize(IRB.getInt32Ty(), "push.unsafe.rewrite");
+
+  for (auto &B : F) {
+    Value *Mask = nullptr;
+    for (auto &I : make_early_inc_range(B)) {
+      // Handle @llvm.unsafe.begin().      
+      Value *Dep;
+      if (match(&I, m_Intrinsic<Intrinsic::unsafe_begin>(m_Value(Dep)))) {
+        IRB.SetInsertPoint(&I);
+        Mask = IRB.CreateIntrinsic(Intrinsic::soundspec_push_unsafe, {Dep});
+        I.eraseFromParent();
+        continue;
+      }
+
+      // Handle @llvm.unsafe.end().
+      if (match(&I, m_Intrinsic<Intrinsic::unsafe_end>()) && Mask) {
+        IRB.SetInsertPoint(&I);
+        auto *Dep = IRB.CreateIntrinsic(Intrinsic::soundspec_pop, {Mask});
+        I.replaceAllUsesWith(Dep);
+        I.eraseFromParent();
+        Mask = nullptr; // Clear it because the begin that generated it was killed by this end.
+        continue;
+      }
+    }
+
+    // Mark any available value that escaped the block.
+    if (Mask)
+      Updater.AddAvailableValue(&B, Mask);
+  }
+
+  // Rewrite any surviving @llvm.unsafe.end()'s. Use
+  // `GetValueInMiddleOfBlock` rather than `GetValueAtEndOfBlock` so that an
+  // end sitting *before* an in-block push.unsafe gets the *incoming* Mask
+  // (the one from predecessors) rather than the later push's Mask. For
+  // blocks with no in-block push the two queries return the same value.
+  for (auto &I : make_early_inc_range(instructions(F))) {
+    if (!match(&I, m_Intrinsic<Intrinsic::unsafe_end>()))
+      continue;
+    auto *Mask = Updater.GetValueInMiddleOfBlock(I.getParent());
+    IRB.SetInsertPoint(&I);
+    auto *Dep = IRB.CreateIntrinsic(Intrinsic::soundspec_pop, {Mask});
+    I.replaceAllUsesWith(Dep);
+    I.eraseFromParent();
+  }
+}
+
 bool runSoundSpecCleanupOnFunction(Function &F) {
   auto &Ctx = F.getContext();
 
@@ -1065,6 +1161,9 @@ bool runSoundSpecCleanupOnFunction(Function &F) {
   checkUnsafeBeginEnd(F);
 
   checkNoTies(F);
+
+  // Convert legacy @llvm.unsafe.begin/end to @llvm.soundspec.push_{unsafe,safe}/pop.
+  convertIntoSoundSpecPushPop(F);
 
   // If we have any soundspec_arg_unsafe, then we need to
   // insert a @llvm.unsafe.end()

@@ -4239,6 +4239,11 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
   }
   case Intrinsic::unsafe_shadow_embed: {
     auto IsBlockingUser = [II](const User *U) {
+      // Returns are transmitter boundaries: the embedded value flows out to
+      // the caller, which expects it shadow-protected. Don't fold the embed
+      // away just because its only user happens to be a `ret`.
+      if (isa<ReturnInst>(U))
+        return true;
       auto *C = dyn_cast<CallBase>(U);
       return C && C->hasArgument(II);
     };

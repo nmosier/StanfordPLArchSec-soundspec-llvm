@@ -765,8 +765,14 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
       LoadInst *NewLoad = IC.combineLoadToNewType(LI, ST->getTypeAtIndex(0U),
                                                   ".unpack");
       NewLoad->setAAMetadata(LI.getAAMetadata());
-      // Copy invariant metadata from parent load.
-      NewLoad->copyMetadata(LI, LLVMContext::MD_invariant_load);
+      // Copy invariant metadata + SoundSpec scope/xmit tags. The verifier
+      // requires !safe transmitters to carry !soundspec.xmit, so the full
+      // SoundSpec quartet has to ride along.
+      NewLoad->copyMetadata(LI, {LLVMContext::MD_invariant_load,
+                                 LLVMContext::MD_safe,
+                                 LLVMContext::MD_unsafe,
+                                 LLVMContext::MD_unsafe_xmit,
+                                 LLVMContext::MD_soundspec_xmit});
       return IC.replaceInstUsesWith(LI, IC.Builder.CreateInsertValue(
         PoisonValue::get(T), NewLoad, 0, Name));
     }
@@ -794,8 +800,14 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
           Name + ".unpack");
       // Propagate AA metadata. It'll still be valid on the narrowed load.
       L->setAAMetadata(LI.getAAMetadata());
-      // Copy invariant metadata from parent load.
-      L->copyMetadata(LI, LLVMContext::MD_invariant_load);
+      // Copy invariant metadata + SoundSpec scope/xmit tags. The verifier
+      // requires !safe transmitters to carry !soundspec.xmit, so the full
+      // SoundSpec quartet has to ride along.
+      L->copyMetadata(LI, {LLVMContext::MD_invariant_load,
+                           LLVMContext::MD_safe,
+                           LLVMContext::MD_unsafe,
+                           LLVMContext::MD_unsafe_xmit,
+                           LLVMContext::MD_soundspec_xmit});
       V = IC.Builder.CreateInsertValue(V, L, i);
     }
 
@@ -809,6 +821,11 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
     if (NumElements == 1) {
       LoadInst *NewLoad = IC.combineLoadToNewType(LI, ET, ".unpack");
       NewLoad->setAAMetadata(LI.getAAMetadata());
+      // Copy SoundSpec scope/xmit tags (see struct-path comment).
+      NewLoad->copyMetadata(LI, {LLVMContext::MD_safe,
+                                 LLVMContext::MD_unsafe,
+                                 LLVMContext::MD_unsafe_xmit,
+                                 LLVMContext::MD_soundspec_xmit});
       return IC.replaceInstUsesWith(LI, IC.Builder.CreateInsertValue(
         PoisonValue::get(T), NewLoad, 0, Name));
     }
@@ -841,6 +858,11 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
       auto *L = IC.Builder.CreateAlignedLoad(AT->getElementType(), Ptr,
                                              EltAlign, Name + ".unpack");
       L->setAAMetadata(LI.getAAMetadata());
+      // Copy SoundSpec scope/xmit tags (see struct-path comment).
+      L->copyMetadata(LI, {LLVMContext::MD_safe,
+                           LLVMContext::MD_unsafe,
+                           LLVMContext::MD_unsafe_xmit,
+                           LLVMContext::MD_soundspec_xmit});
       V = IC.Builder.CreateInsertValue(V, L, i);
       Offset += EltSize;
     }

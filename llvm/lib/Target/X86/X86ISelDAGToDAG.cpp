@@ -5175,35 +5175,6 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
 
   switch (Opcode) {
   default: break;
-  case ISD::UNSAFE_BEGIN: {
-    // SoundSpec begin: chain-carrying X86 pseudo with one GR32 register use
-    // (the dep token). ISD operand order is {chain, dep}; the MachineSDNode
-    // needs the chain at the tail.
-    CurDAG->SelectNodeTo(Node, X86::UNSAFE_BEGIN, MVT::Other,
-                         {Node->getOperand(1), Node->getOperand(0)});
-    return;
-  }
-  case ISD::UNSAFE_END: {
-    // SoundSpec end: chain-carrying X86 pseudo, produces an i32 result
-    // in a GR32. Results are {i32, chain}; operand list is just {chain}.
-    CurDAG->SelectNodeTo(Node, X86::UNSAFE_END, MVT::i32, MVT::Other,
-                         {Node->getOperand(0)});
-    return;
-  }
-  case ISD::SAFE_BEGIN: {
-    // SoundSpec safe-region begin: chain-carrying X86 instruction with no
-    // value operands or results (fixed ModR/M = 0xD8).
-    CurDAG->SelectNodeTo(Node, X86::SAFE_BEGIN, MVT::Other,
-                         {Node->getOperand(0)});
-    return;
-  }
-  case ISD::SAFE_END: {
-    // SoundSpec safe-region end: chain-carrying X86 instruction with no
-    // value operands or results (fixed ModR/M = 0xD9).
-    CurDAG->SelectNodeTo(Node, X86::SAFE_END, MVT::Other,
-                         {Node->getOperand(0)});
-    return;
-  }
   case ISD::UNSAFE_SHADOW_EMBED: {
     // Keep this abstract through ISel: emit the target-independent
     // UNSAFE_SHADOW_EMBED meta pseudo ({data, dep}, with $val tied to $dst)

@@ -315,42 +315,41 @@ def SOUNDSPEC_CFI_SRC : PseudoI<
   let AsmString = "soundspec_cfi_src\t$id";
 }
 
-// UNSAFE_{BEGIN,END} and SAFE_{BEGIN,END} share a SoundSpec sub-table at TB
-// opcode 0x19, distinguished by the ModR/M byte (all mod=11):
+// SoundSpec scope-stack ops share a SoundSpec sub-table at TB opcode 0x19,
+// all mod=11 register form. Each takes a single GR32 operand that is both
+// READ AND WRITTEN (tied $src = $dst); the register encoded in r/m carries
+// the Mask both in and out of the operation:
 //
-//   /0 r/m=sss ->  UNSAFE_BEGIN  $src   0F 19 11.000.sss   (sss = $src i32)
-//   /1 r/m=ddd ->  UNSAFE_END    $dst   0F 19 11.001.ddd   (ddd = $dst i32)
-//   /3 r/m=0   ->  SAFE_BEGIN           0F 19 11.011.000   (= 0F 19 D8)
-//   /3 r/m=1   ->  SAFE_END             0F 19 11.011.001   (= 0F 19 D9)
+//   /0 r/m=rrr ->  SOUNDSPEC_PUSH_UNSAFE  $reg   0F 19 11.000.rrr
+//   /1 r/m=rrr ->  SOUNDSPEC_PUSH_SAFE    $reg   0F 19 11.001.rrr
+//   /2 r/m=rrr ->  SOUNDSPEC_POP          $reg   0F 19 11.010.rrr
 //
 // `0F 19` (along with 0F 1A–0F 1F) sits in the multi-byte-NOP/PREFETCH
 // reserved-hint region. Mod=11 forms of these are #UD on current x86,
 // so SoundSpec silicon can repurpose them. We *do* expose these to the
 // disassembler/asm-parser so `llvm-objdump` / `lldb` render SoundSpec
 // instructions with their real mnemonics instead of as generic NOPs.
-def UNSAFE_BEGIN : I<0x19, MRM0r, (outs), (ins GR32:$src),
-                     "unsafe_begin\t$src", []>, TB, Sched<[]> {
-  let hasSideEffects = 1;
-  let mayLoad = 0;
-  let mayStore = 0;
-}
-def UNSAFE_END : I<0x19, MRM1r, (outs GR32:$dst), (ins),
-                   "unsafe_end\t$dst", []>, TB, Sched<[]> {
-  let hasSideEffects = 1;
-  let mayLoad = 0;
-  let mayStore = 0;
-}
-def SAFE_BEGIN : I<0x19, MRM_D8, (outs), (ins),
-                   "safe_begin", []>, TB, Sched<[]> {
-  let hasSideEffects = 1;
-  let mayLoad = 0;
-  let mayStore = 0;
-}
-def SAFE_END : I<0x19, MRM_D9, (outs), (ins),
-                 "safe_end", []>, TB, Sched<[]> {
-  let hasSideEffects = 1;
-  let mayLoad = 0;
-  let mayStore = 0;
+// mayLoad / mayStore / hasSideEffects are inferred by tablegen from each
+// intrinsic's `IntrWrite<[InaccessibleMem]>` memory-effect attribute:
+// writeonly inaccessible → mayStore = 1, which is sufficient to block DCE,
+// CSE, and reordering in either direction (no MMO on the pseudo keeps alias
+// analysis maximally conservative).
+let Constraints = "$src = $dst" in {
+  def SOUNDSPEC_PUSH_UNSAFE
+      : I<0x19, MRM0r, (outs GR32:$dst), (ins GR32:$src),
+          "soundspec_push_unsafe\t$dst",
+          [(set GR32:$dst, (int_soundspec_push_unsafe GR32:$src))]>,
+        TB, Sched<[]>;
+  def SOUNDSPEC_PUSH_SAFE
+      : I<0x19, MRM1r, (outs GR32:$dst), (ins GR32:$src),
+          "soundspec_push_safe\t$dst",
+          [(set GR32:$dst, (int_soundspec_push_safe GR32:$src))]>,
+        TB, Sched<[]>;
+  def SOUNDSPEC_POP
+      : I<0x19, MRM2r, (outs GR32:$dst), (ins GR32:$src),
+          "soundspec_pop\t$dst",
+          [(set GR32:$dst, (int_soundspec_pop GR32:$src))]>,
+        TB, Sched<[]>;
 }
 // SOUNDSPEC_PROTECT_GR{32,64} mark a GPR data value as data-dependent on
 // a dep token. Encoded as `0F 1E 11.ddd.sss` (GR32) or
