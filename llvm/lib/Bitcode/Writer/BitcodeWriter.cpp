@@ -906,6 +906,8 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_SANITIZE_REALTIME;
   case Attribute::SanitizeRealtimeBlocking:
     return bitc::ATTR_KIND_SANITIZE_REALTIME_BLOCKING;
+  case Attribute::SoundSpecArgUnsafe:
+    return bitc::ATTR_KIND_SOUNDSPEC_ARG_UNSAFE;
   case Attribute::SpeculativeLoadHardening:
     return bitc::ATTR_KIND_SPECULATIVE_LOAD_HARDENING;
   case Attribute::SwiftError:
@@ -958,14 +960,6 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_DEAD_ON_RETURN;
   case Attribute::NoCreateUndefOrPoison:
     return bitc::ATTR_KIND_NO_CREATE_UNDEF_OR_POISON;
-  case Attribute::Unsafe:
-    return bitc::ATTR_KIND_UNSAFE;
-  case Attribute::SoundSpecCfi:
-    return bitc::ATTR_KIND_SOUNDSPEC_CFI;
-  case Attribute::SoundSpecArgUnsafe:
-    return bitc::ATTR_KIND_SOUNDSPEC_ARG_UNSAFE;
-  case Attribute::Idempotent:
-    return bitc::ATTR_KIND_IDEMPOTENT;
   case Attribute::EndAttrKinds:
     llvm_unreachable("Can not encode end-attribute kinds marker.");
   case Attribute::None:

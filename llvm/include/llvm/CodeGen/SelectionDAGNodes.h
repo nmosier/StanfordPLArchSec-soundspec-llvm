@@ -427,6 +427,10 @@ public:
     // implied by its producer as, e.g, operations between producer and PTRADD
     // that affect the provenance may have been optimized away.
     InBounds = 1 << 15,
+    // SoundSpec: speculation primitive marked safe at the IR level via
+    // `!safe` metadata. Mirrors `MachineInstr::MIFlag::Safe`; rides through
+    // the SDNode → MI transit in InstrEmitter alongside `Unpredictable`.
+    Safe = 1 << 16,
 
     // NOTE: Please update LargestValue in LLVM_DECLARE_ENUM_AS_BITMASK below
     // the class definition when adding new flags.
@@ -468,6 +472,7 @@ public:
   void setNoFPExcept(bool b) { setFlag<NoFPExcept>(b); }
   void setUnpredictable(bool b) { setFlag<Unpredictable>(b); }
   void setInBounds(bool b) { setFlag<InBounds>(b); }
+  void setSafe(bool b) { setFlag<Safe>(b); }
 
   // These are accessors for each flag.
   bool hasNoUnsignedWrap() const { return Flags & NoUnsignedWrap; }
@@ -486,6 +491,7 @@ public:
   bool hasNoFPExcept() const { return Flags & NoFPExcept; }
   bool hasUnpredictable() const { return Flags & Unpredictable; }
   bool hasInBounds() const { return Flags & InBounds; }
+  bool hasSafe() const { return Flags & Safe; }
 
   bool operator==(const SDNodeFlags &Other) const {
     return Flags == Other.Flags;
@@ -495,7 +501,7 @@ public:
 };
 
 LLVM_DECLARE_ENUM_AS_BITMASK(decltype(SDNodeFlags::None),
-                             SDNodeFlags::InBounds);
+                             SDNodeFlags::Safe);
 
 inline SDNodeFlags operator|(SDNodeFlags LHS, SDNodeFlags RHS) {
   LHS |= RHS;

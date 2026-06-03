@@ -5175,55 +5175,6 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
 
   switch (Opcode) {
   default: break;
-  case ISD::UNSAFE_SHADOW_EMBED: {
-    // Keep this abstract through ISel: emit the target-independent
-    // UNSAFE_SHADOW_EMBED meta pseudo ({data, dep}, with $val tied to $dst)
-    // and let it ride through register allocation. X86SoundSpecMIROptimizer
-    // lowers it post-RA to a width-specific SOUNDSPEC_PROTECT_GR{32,64} (or
-    // an LFENCE fallback for reg classes without a PROTECT variant), where
-    // instructions have a real linear order and the physregs are known.
-    MVT VT = Node->getValueType(0).getSimpleVT();
-    CurDAG->SelectNodeTo(Node, TargetOpcode::UNSAFE_SHADOW_EMBED, VT,
-                         {Node->getOperand(0), Node->getOperand(1)});
-    return;
-  }
-  case ISD::UNSAFE_SHADOW_ARG: {
-    // The shadow-arg node is a pure marker for SDAG: it just makes the
-    // function argument visible as a dep token. For GPR sources we don't
-    // need any actual instruction — the input register IS the shadow
-    // value (i32 src → i32 result is identity; i64 src → i32 result is
-    // the low sub_32bit). Just pass the source through.
-    SDLoc DL(Node);
-    SDValue Src = Node->getOperand(0);
-    MVT SrcVT = Src.getValueType().getSimpleVT();
-    switch (SrcVT.SimpleTy) {
-    case MVT::i32: {
-      CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), Src);
-      CurDAG->RemoveDeadNode(Node);
-      return;
-    }
-    case MVT::i64: {
-      SDValue I32 = CurDAG->getTargetExtractSubreg(X86::sub_32bit, DL,
-                                                   MVT::i32, Src);
-      CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), I32);
-      CurDAG->RemoveDeadNode(Node);
-      return;
-    }
-    default:
-      // No `unsafe_arg` form for this register class (XMM, YMM, ZMM, GR8/16,
-      // etc.). Emit the UNSAFE_ARG_LFENCE carrier pseudo: it produces the i32
-      // shadow token (so it survives as a used def, unlike a chainless LFENCE
-      // which would be DCE'd) and is lowered post-RA by X86SoundSpecMIROptimizer
-      // to a real LFENCE (the actual barrier) plus a zero token. Doing it in
-      // the MIR pass keeps the fence at this program point instead of bolting
-      // it to the DAG root, where it dies.
-      SDValue Tok(CurDAG->getMachineNode(X86::UNSAFE_ARG_LFENCE, DL, MVT::i32),
-                  0);
-      CurDAG->ReplaceAllUsesOfValueWith(SDValue(Node, 0), Tok);
-      CurDAG->RemoveDeadNode(Node);
-      return;
-    }
-  }
   case ISD::INTRINSIC_W_CHAIN: {
     unsigned IntNo = Node->getConstantOperandVal(1);
     switch (IntNo) {

@@ -27,6 +27,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/SoundSpec.h"
 
 #define DEBUG_TYPE "x86-isel"
 
@@ -2709,6 +2710,14 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   if (IsCFICall)
     Chain.getNode()->setCFIType(CLI.CFIType->getZExtValue());
+
+  // SoundSpec: stamp the Safe flag if the IR CallBase carries `!safe`. Rides
+  // through to MIFlag::Safe on the lowered CALL MI via InstrEmitter.
+  if (CLI.CB && soundspec::isSafe(*CLI.CB)) {
+    SDNodeFlags Flags = Chain.getNode()->getFlags();
+    Flags.setSafe(true);
+    Chain.getNode()->setFlags(Flags);
+  }
 
   InGlue = Chain.getValue(1);
   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);

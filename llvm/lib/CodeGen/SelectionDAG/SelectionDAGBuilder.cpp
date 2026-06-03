@@ -85,6 +85,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/SoundSpec.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
@@ -2458,7 +2459,8 @@ SelectionDAGBuilder::EmitBranchForMergedCondition(const Value *Cond,
                                                   MachineBasicBlock *SwitchBB,
                                                   BranchProbability TProb,
                                                   BranchProbability FProb,
-                                                  bool InvertCond) {
+                                                  bool InvertCond,
+                                                  bool IsSafe) {
   const BasicBlock *BB = CurBB->getBasicBlock();
 
   // If the leaf of the tree is a comparison, merge the condition into
@@ -2485,7 +2487,8 @@ SelectionDAGBuilder::EmitBranchForMergedCondition(const Value *Cond,
       }
 
       CaseBlock CB(Condition, BOp->getOperand(0), BOp->getOperand(1), nullptr,
-                   TBB, FBB, CurBB, getCurSDLoc(), TProb, FProb);
+                   TBB, FBB, CurBB, getCurSDLoc(), TProb, FProb,
+                   /*IsUnpredictable=*/false, IsSafe);
       SL->SwitchCases.push_back(CB);
       return;
     }
@@ -2494,7 +2497,8 @@ SelectionDAGBuilder::EmitBranchForMergedCondition(const Value *Cond,
   // Create a CaseBlock record representing this branch.
   ISD::CondCode Opc = InvertCond ? ISD::SETNE : ISD::SETEQ;
   CaseBlock CB(Opc, Cond, ConstantInt::getTrue(*DAG.getContext()),
-               nullptr, TBB, FBB, CurBB, getCurSDLoc(), TProb, FProb);
+               nullptr, TBB, FBB, CurBB, getCurSDLoc(), TProb, FProb,
+               /*IsUnpredictable=*/false, IsSafe);
   SL->SwitchCases.push_back(CB);
 }
 
@@ -2648,14 +2652,14 @@ void SelectionDAGBuilder::FindMergedConditions(const Value *Cond,
                                                Instruction::BinaryOps Opc,
                                                BranchProbability TProb,
                                                BranchProbability FProb,
-                                               bool InvertCond) {
+                                               bool InvertCond, bool IsSafe) {
   // Skip over not part of the tree and remember to invert op and operands at
   // next level.
   Value *NotCond;
   if (match(Cond, m_OneUse(m_Not(m_Value(NotCond)))) &&
       InBlock(NotCond, CurBB->getBasicBlock())) {
     FindMergedConditions(NotCond, TBB, FBB, CurBB, SwitchBB, Opc, TProb, FProb,
-                         !InvertCond);
+                         !InvertCond, IsSafe);
     return;
   }
 
@@ -2688,7 +2692,7 @@ void SelectionDAGBuilder::FindMergedConditions(const Value *Cond,
       !InBlock(BOpOp0, CurBB->getBasicBlock()) ||
       !InBlock(BOpOp1, CurBB->getBasicBlock())) {
     EmitBranchForMergedCondition(Cond, TBB, FBB, CurBB, SwitchBB,
-                                 TProb, FProb, InvertCond);
+                                 TProb, FProb, InvertCond, IsSafe);
     return;
   }
 
@@ -2723,14 +2727,14 @@ void SelectionDAGBuilder::FindMergedConditions(const Value *Cond,
     auto NewFalseProb = TProb / 2 + FProb;
     // Emit the LHS condition.
     FindMergedConditions(BOpOp0, TBB, TmpBB, CurBB, SwitchBB, Opc, NewTrueProb,
-                         NewFalseProb, InvertCond);
+                         NewFalseProb, InvertCond, IsSafe);
 
     // Normalize A/2 and B to get A/(1+B) and 2B/(1+B).
     SmallVector<BranchProbability, 2> Probs{TProb / 2, FProb};
     BranchProbability::normalizeProbabilities(Probs.begin(), Probs.end());
     // Emit the RHS condition into TmpBB.
     FindMergedConditions(BOpOp1, TBB, FBB, TmpBB, SwitchBB, Opc, Probs[0],
-                         Probs[1], InvertCond);
+                         Probs[1], InvertCond, IsSafe);
   } else {
     assert(Opc == Instruction::And && "Unknown merge op!");
     // Codegen X & Y as:
@@ -2756,14 +2760,14 @@ void SelectionDAGBuilder::FindMergedConditions(const Value *Cond,
     auto NewFalseProb = FProb / 2;
     // Emit the LHS condition.
     FindMergedConditions(BOpOp0, TmpBB, FBB, CurBB, SwitchBB, Opc, NewTrueProb,
-                         NewFalseProb, InvertCond);
+                         NewFalseProb, InvertCond, IsSafe);
 
     // Normalize A and B/2 to get 2A/(1+A) and B/(1+A).
     SmallVector<BranchProbability, 2> Probs{TProb, FProb / 2};
     BranchProbability::normalizeProbabilities(Probs.begin(), Probs.end());
     // Emit the RHS condition into TmpBB.
     FindMergedConditions(BOpOp1, TBB, FBB, TmpBB, SwitchBB, Opc, Probs[0],
-                         Probs[1], InvertCond);
+                         Probs[1], InvertCond, IsSafe);
   }
 }
 
@@ -2844,6 +2848,7 @@ void SelectionDAGBuilder::visitBr(const BranchInst &I) {
   //     cmp D, E
   //     jle foo
   bool IsUnpredictable = I.hasMetadata(LLVMContext::MD_unpredictable);
+  bool IsSafe = soundspec::isSafe(I);
   const Instruction *BOp = dyn_cast<Instruction>(CondVal);
   if (!DAG.getTargetLoweringInfo().isJumpExpensive() && BOp &&
       BOp->hasOneUse() && !IsUnpredictable) {
@@ -2865,7 +2870,7 @@ void SelectionDAGBuilder::visitBr(const BranchInst &I) {
       FindMergedConditions(BOp, Succ0MBB, Succ1MBB, BrMBB, BrMBB, Opcode,
                            getEdgeProbability(BrMBB, Succ0MBB),
                            getEdgeProbability(BrMBB, Succ1MBB),
-                           /*InvertCond=*/false);
+                           /*InvertCond=*/false, IsSafe);
       // If the compares in later blocks need to use values not currently
       // exported from this block, export them now.  This block should always
       // be the first entry.
@@ -2897,7 +2902,7 @@ void SelectionDAGBuilder::visitBr(const BranchInst &I) {
   CaseBlock CB(ISD::SETEQ, CondVal, ConstantInt::getTrue(*DAG.getContext()),
                nullptr, Succ0MBB, Succ1MBB, BrMBB, getCurSDLoc(),
                BranchProbability::getUnknown(), BranchProbability::getUnknown(),
-               IsUnpredictable);
+               IsUnpredictable, IsSafe);
 
   // Use visitSwitchCase to actually insert the fast branch sequence for this
   // cond branch.
@@ -2987,6 +2992,7 @@ void SelectionDAGBuilder::visitSwitchCase(CaseBlock &CB,
 
   SDNodeFlags Flags;
   Flags.setUnpredictable(CB.IsUnpredictable);
+  Flags.setSafe(CB.IsSafe);
   SDValue BrCond = DAG.getNode(ISD::BRCOND, dl, MVT::Other, getControlRoot(),
                                Cond, DAG.getBasicBlock(CB.TrueBB), Flags);
 
@@ -3009,8 +3015,10 @@ void SelectionDAGBuilder::visitJumpTable(SwitchCG::JumpTable &JT) {
   EVT PTy = DAG.getTargetLoweringInfo().getJumpTableRegTy(DAG.getDataLayout());
   SDValue Index = DAG.getCopyFromReg(getControlRoot(), *JT.SL, JT.Reg, PTy);
   SDValue Table = DAG.getJumpTable(JT.JTI, PTy);
+  SDNodeFlags Flags;
+  Flags.setSafe(JT.IsSafe);
   SDValue BrJumpTable = DAG.getNode(ISD::BR_JT, *JT.SL, MVT::Other,
-                                    Index.getValue(1), Table, Index);
+                                    Index.getValue(1), Table, Index, Flags);
   DAG.setRoot(BrJumpTable);
 }
 
@@ -3052,9 +3060,11 @@ void SelectionDAGBuilder::visitJumpTableHeader(SwitchCG::JumpTable &JT,
                                    Sub.getValueType()),
         Sub, DAG.getConstant(JTH.Last - JTH.First, dl, VT), ISD::SETUGT);
 
+    SDNodeFlags BrFlags;
+    BrFlags.setSafe(JT.IsSafe);
     SDValue BrCond = DAG.getNode(ISD::BRCOND, dl,
                                  MVT::Other, CopyTo, CMP,
-                                 DAG.getBasicBlock(JT.Default));
+                                 DAG.getBasicBlock(JT.Default), BrFlags);
 
     // Avoid emitting unnecessary branches to the next block.
     if (JT.MBB != NextBlock(SwitchBB))
@@ -3325,8 +3335,10 @@ void SelectionDAGBuilder::visitBitTestHeader(BitTestBlock &B,
         RangeSub, DAG.getConstant(B.Range, dl, RangeSub.getValueType()),
         ISD::SETUGT);
 
+    SDNodeFlags BrFlags;
+    BrFlags.setSafe(B.IsSafe);
     Root = DAG.getNode(ISD::BRCOND, dl, MVT::Other, Root, RangeCmp,
-                       DAG.getBasicBlock(B.Default));
+                       DAG.getBasicBlock(B.Default), BrFlags);
   }
 
   // Avoid emitting unnecessary branches to the next block.
@@ -3382,9 +3394,11 @@ void SelectionDAGBuilder::visitBitTestCase(BitTestBlock &BB,
   // and hence we need to normalize them to let the sum of them become one.
   SwitchBB->normalizeSuccProbs();
 
+  SDNodeFlags BrFlags;
+  BrFlags.setSafe(BB.IsSafe);
   SDValue BrAnd = DAG.getNode(ISD::BRCOND, dl,
                               MVT::Other, getControlRoot(),
-                              Cmp, DAG.getBasicBlock(B.TargetBB));
+                              Cmp, DAG.getBasicBlock(B.TargetBB), BrFlags);
 
   // Avoid emitting unnecessary branches to the next block.
   if (NextMBB != NextBlock(SwitchBB))
@@ -3663,9 +3677,11 @@ void SelectionDAGBuilder::visitIndirectBr(const IndirectBrInst &I) {
   }
   IndirectBrMBB->normalizeSuccProbs();
 
+  SDNodeFlags Flags;
+  Flags.setSafe(soundspec::isSafe(I));
   DAG.setRoot(DAG.getNode(ISD::BRIND, getCurSDLoc(),
                           MVT::Other, getControlRoot(),
-                          getValue(I.getAddress())));
+                          getValue(I.getAddress()), Flags));
 }
 
 void SelectionDAGBuilder::visitUnreachable(const UnreachableInst &I) {
@@ -4885,6 +4901,7 @@ void SelectionDAGBuilder::visitStore(const StoreInst &I) {
   AAMDNodes AAInfo = I.getAAMetadata();
 
   auto MMOFlags = TLI.getStoreMemOperandFlags(I, DAG.getDataLayout());
+  bool IsSafe = soundspec::isSafe(I);
 
   unsigned ChainI = 0;
   for (unsigned i = 0; i != NumValues; ++i, ++ChainI) {
@@ -4908,6 +4925,11 @@ void SelectionDAGBuilder::visitStore(const StoreInst &I) {
       Val = DAG.getPtrExtOrTrunc(Val, dl, MemVTs[i]);
     SDValue St =
         DAG.getStore(Root, dl, Val, Add, PtrInfo, Alignment, MMOFlags, AAInfo);
+    if (IsSafe) {
+      SDNodeFlags Flags = St->getFlags();
+      Flags.setSafe(true);
+      St->setFlags(Flags);
+    }
     Chains[ChainI] = St;
   }
 
@@ -7047,70 +7069,6 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     setValue(&I, DAG.getNode(ISD::ARITH_FENCE, sdl,
                              getValue(I.getArgOperand(0)).getValueType(),
                              getValue(I.getArgOperand(0)), Flags));
-    return;
-  }
-  case Intrinsic::unsafe_shadow_dep: {
-    // SoundSpec shadow-token combiner. Lowers to a plain 32-bit OR: the
-    // shadow IR uses OR-semantics to merge two dep tokens, and at the
-    // machine level a regular `or r32, r32` carries the same data
-    // dependency for the speculation-blocker that consumes the result.
-    // Going straight to ISD::OR lets the existing target ISel patterns
-    // pick the right instruction (X86 OR32rr, etc.) and lets DAGCombine
-    // do its usual cleanup (e.g. folding `dep(x, 0) -> x`).
-    SDValue X = getValue(I.getArgOperand(0));
-    SDValue Y = getValue(I.getArgOperand(1));
-    setValue(&I, DAG.getNode(ISD::OR, sdl, MVT::i32, X, Y));
-    return;
-  }
-  case Intrinsic::unsafe_shadow_arg: {
-    // SoundSpec shadow-token derived from an arbitrary input value. Pure:
-    // no chain, just an i32 result from a value of any type.
-    SDValue Arg = getValue(I.getArgOperand(0));
-    setValue(&I, DAG.getNode(ISD::UNSAFE_SHADOW_ARG, sdl, MVT::i32, Arg));
-    return;
-  }
-  case Intrinsic::unsafe_shadow_embed: {
-    // SoundSpec passthrough: result type matches operand 0. Operand 1 is
-    // the i32 shadow token, kept as an extra register use. For aggregate
-    // IR types (e.g. `{ ptr, i64 }`), `getValue` returns a MERGE_VALUES
-    // with one SDAG value per flattened field, so we emit one
-    // UNSAFE_SHADOW_EMBED per field and stitch them back together with a
-    // MERGE_VALUES — otherwise the new SDNode would have just a single
-    // result and downstream visitors (e.g. `visitRet`) would assert
-    // accessing the higher-indexed values.
-    //
-    // The field count MUST come from the IR type — *not* from
-    // `Val.getNode()->getNumValues()`, which counts every SDAG result of
-    // the producing node (including chain/glue outputs of e.g. a LOAD).
-    // Using the SDNode count was a long-standing bug: for scalar-typed
-    // embeds whose data came from a load, NumVals was 2 (data + chain),
-    // and the second iteration created a bogus UNSAFE_SHADOW_EMBED with
-    // an MVT::Other "data" operand — corrupting the SDAG with a phantom
-    // chain-typed embed that downstream passes couldn't make sense of,
-    // manifesting as runtime miscompilation.
-    SDValue Tok = getValue(I.getArgOperand(1));
-    SmallVector<EVT, 4> ValueVTs;
-    ComputeValueVTs(DAG.getTargetLoweringInfo(), DAG.getDataLayout(),
-                    I.getArgOperand(0)->getType(), ValueVTs);
-    unsigned NumVals = ValueVTs.size();
-    if (NumVals == 1) {
-      SDValue Val = getValue(I.getArgOperand(0));
-      setValue(&I,
-               DAG.getNode(ISD::UNSAFE_SHADOW_EMBED, sdl, Val.getValueType(),
-                           Val, Tok));
-    } else {
-      SDValue Val = getValue(I.getArgOperand(0));
-      assert(Val.getNode()->getNumValues() >= NumVals &&
-             "aggregate IR value lowered to too few SDAG results");
-      SmallVector<SDValue, 4> Embedded;
-      Embedded.reserve(NumVals);
-      for (unsigned Idx = 0; Idx < NumVals; ++Idx) {
-        SDValue Field(Val.getNode(), Val.getResNo() + Idx);
-        Embedded.push_back(DAG.getNode(ISD::UNSAFE_SHADOW_EMBED, sdl,
-                                       Field.getValueType(), Field, Tok));
-      }
-      setValue(&I, DAG.getMergeValues(Embedded, sdl));
-    }
     return;
   }
   case Intrinsic::fma:
@@ -12437,6 +12395,7 @@ void SelectionDAGBuilder::lowerWorkItem(SwitchWorkListItem W, Value *Cond,
         // FIXME: Optimize away range check based on pivot comparisons.
         JumpTableHeader *JTH = &SL->JTCases[I->JTCasesIndex].first;
         SwitchCG::JumpTable *JT = &SL->JTCases[I->JTCasesIndex].second;
+        JT->IsSafe = W.IsSafe;
 
         // The jump block hasn't been inserted yet; insert it here.
         MachineBasicBlock *JumpMBB = JT->MBB;
@@ -12497,6 +12456,7 @@ void SelectionDAGBuilder::lowerWorkItem(SwitchWorkListItem W, Value *Cond,
       case CC_BitTests: {
         // FIXME: Optimize away range check based on pivot comparisons.
         BitTestBlock *BTB = &SL->BitTestCases[I->BTCasesIndex];
+        BTB->IsSafe = W.IsSafe;
 
         // The bit test blocks haven't been inserted yet; insert them here.
         for (BitTestCase &BTC : BTB->Cases)
@@ -12548,7 +12508,8 @@ void SelectionDAGBuilder::lowerWorkItem(SwitchWorkListItem W, Value *Cond,
 
         // The false probability is the sum of all unhandled cases.
         CaseBlock CB(CC, LHS, RHS, MHS, I->MBB, Fallthrough, CurMBB,
-                     getCurSDLoc(), I->Prob, UnhandledProbs);
+                     getCurSDLoc(), I->Prob, UnhandledProbs,
+                     /*IsUnpredictable=*/false, W.IsSafe);
 
         if (CurMBB == SwitchMBB)
           visitSwitchCase(CB, SwitchMBB);
@@ -12600,7 +12561,8 @@ void SelectionDAGBuilder::splitWorkItem(SwitchWorkList &WorkList,
     LeftMBB = FuncInfo.MF->CreateMachineBasicBlock(W.MBB->getBasicBlock());
     FuncInfo.MF->insert(BBI, LeftMBB);
     WorkList.push_back(
-        {LeftMBB, FirstLeft, LastLeft, W.GE, Pivot, W.DefaultProb / 2});
+        {LeftMBB, FirstLeft, LastLeft, W.GE, Pivot, W.DefaultProb / 2,
+         W.IsSafe});
     // Put Cond in a virtual register to make it available from the new blocks.
     ExportFromCurrentBlock(Cond);
   }
@@ -12616,14 +12578,16 @@ void SelectionDAGBuilder::splitWorkItem(SwitchWorkList &WorkList,
     RightMBB = FuncInfo.MF->CreateMachineBasicBlock(W.MBB->getBasicBlock());
     FuncInfo.MF->insert(BBI, RightMBB);
     WorkList.push_back(
-        {RightMBB, FirstRight, LastRight, Pivot, W.LT, W.DefaultProb / 2});
+        {RightMBB, FirstRight, LastRight, Pivot, W.LT, W.DefaultProb / 2,
+         W.IsSafe});
     // Put Cond in a virtual register to make it available from the new blocks.
     ExportFromCurrentBlock(Cond);
   }
 
   // Create the CaseBlock record that will be used to lower the branch.
   CaseBlock CB(ISD::SETLT, Cond, Pivot, nullptr, LeftMBB, RightMBB, W.MBB,
-               getCurSDLoc(), LeftProb, RightProb);
+               getCurSDLoc(), LeftProb, RightProb,
+               /*IsUnpredictable=*/false, W.IsSafe);
 
   if (W.MBB == SwitchMBB)
     visitSwitchCase(CB, SwitchMBB);
@@ -12686,8 +12650,10 @@ MachineBasicBlock *SelectionDAGBuilder::peelDominantCaseCluster(
 
   ExportFromCurrentBlock(SI.getCondition());
   auto PeeledCaseIt = Clusters.begin() + PeeledCaseIndex;
+  bool IsSafe = soundspec::isSafe(SI);
   SwitchWorkListItem W = {SwitchMBB, PeeledCaseIt, PeeledCaseIt,
-                          nullptr,   nullptr,      TopCaseProb.getCompl()};
+                          nullptr,   nullptr,      TopCaseProb.getCompl(),
+                          IsSafe};
   lowerWorkItem(W, SI.getCondition(), SwitchMBB, PeeledSwitchMBB);
 
   Clusters.erase(PeeledCaseIt);
@@ -12772,8 +12738,9 @@ void SelectionDAGBuilder::visitSwitch(const SwitchInst &SI) {
   if (PeeledCaseProb != BranchProbability::getZero() &&
       DefaultMBB == FuncInfo.getMBB(SI.getDefaultDest()))
     DefaultProb = scaleCaseProbality(DefaultProb, PeeledCaseProb);
+  bool IsSafe = soundspec::isSafe(SI);
   WorkList.push_back(
-      {PeeledSwitchMBB, First, Last, nullptr, nullptr, DefaultProb});
+      {PeeledSwitchMBB, First, Last, nullptr, nullptr, DefaultProb, IsSafe});
 
   while (!WorkList.empty()) {
     SwitchWorkListItem W = WorkList.pop_back_val();

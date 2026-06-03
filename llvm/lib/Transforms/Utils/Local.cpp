@@ -61,7 +61,6 @@
 #include "llvm/IR/MemoryModelRelaxationAnnotations.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Type.h"
@@ -137,7 +136,6 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
                                   DomTreeUpdater *DTU) {
   Instruction *T = BB->getTerminator();
   IRBuilder<> Builder(T);
-  Builder.SetUnsafeMetadata(T->getMetadata(LLVMContext::MD_unsafe));
 
   // Branch - See if we are conditional jumping on constant
   if (auto *BI = dyn_cast<BranchInst>(T)) {
@@ -318,13 +316,6 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions,
       BranchInst *NewBr = Builder.CreateCondBr(Cond,
                                                FirstCase.getCaseSuccessor(),
                                                SI->getDefaultDest());
-
-      // [soundspec] The new conditional branch is a speculation primitive
-      // that inherits its scope from the switch it replaces.
-      if (MDNode *MD = SI->getMetadata(LLVMContext::MD_safe))
-        NewBr->setMetadata(LLVMContext::MD_safe, MD);
-      if (MDNode *MD = SI->getMetadata(LLVMContext::MD_unsafe))
-        NewBr->setMetadata(LLVMContext::MD_unsafe, MD);
       SmallVector<uint32_t> Weights;
       if (extractBranchWeights(*SI, Weights) && Weights.size() == 2) {
         uint32_t DefWeight = Weights[0];
@@ -2536,9 +2527,6 @@ unsigned llvm::changeToUnreachable(Instruction *I, bool PreserveLCSSA,
     if (DTU)
       UniqueSuccessors.insert(Successor);
   }
-  // [soundspec] I don't think we need to tag unreachable instructions with
-  // unsafe scopes, ever.
-  // Revisit this if I change my mind.
   auto *UI = new UnreachableInst(I->getContext(), I->getIterator());
   UI->setDebugLoc(I->getDebugLoc());
 
@@ -2642,13 +2630,6 @@ BasicBlock *llvm::changeToInvokeAndSplitBasicBlock(CallInst *CI,
   II->setCallingConv(CI->getCallingConv());
   II->setAttributes(CI->getAttributes());
   II->setMetadata(LLVMContext::MD_prof, CI->getMetadata(LLVMContext::MD_prof));
-  // [soundspec] The invoke replaces CI semantically; carry over the
-  // speculation-scope metadata so the new call site stays verifier-clean.
-  II->copyMetadata(*CI, {LLVMContext::MD_safe,
-                         LLVMContext::MD_unsafe,
-                         LLVMContext::MD_unsafe_init,
-                         LLVMContext::MD_unsafe_xmit,
-                         LLVMContext::MD_unsafe_spec});
 
   if (DTU)
     DTU->applyUpdates({{DominatorTree::Insert, BB, UnwindEdge}});
@@ -2952,35 +2933,6 @@ static void combineMetadata(Instruction *K, const Instruction *J,
       default:
         K->setMetadata(Kind, nullptr); // Remove unknown metadata
         break;
-      // [soundspec] Preserve SoundSpec scope tags on K untouched. These are
-      // per-instruction scope identifiers; combining instructions should not
-      // erase the surviving instruction's scope.
-      case LLVMContext::MD_safe:
-      case LLVMContext::MD_unsafe:
-      case LLVMContext::MD_unsafe_init:
-      case LLVMContext::MD_unsafe_xmit:
-      case LLVMContext::MD_unsafe_spec:
-      case LLVMContext::MD_soundspec_store:
-        break;
-      case LLVMContext::MD_soundspec_xmit: {
-        // [soundspec] Merge policy depends on whether K is an xmit
-        // call or a transmitter:
-        //
-        //   - xmit↔xmit (idempotent CSE collapse): union the operand
-        //     lists so the surviving xmit covers every transmitter
-        //     that linked to either original.
-        //
-        //   - transmitter↔transmitter (e.g. load CSE): keep K's MD
-        //     untouched. J's IDs die with J — no other instruction
-        //     references them. Concatting them onto K would smuggle
-        //     in IDs that aren't backed by any xmit (especially when
-        //     J was an unsafe transmitter whose !soundspec.xmit is
-        //     stale scaffolding), tripping the verifier.
-        using namespace llvm::PatternMatch;
-        if (match(K, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
-          K->setMetadata(Kind, unsafe::concatMetadataNodes(KMD, JMD));
-        break;
-      }
       case LLVMContext::MD_dbg:
         llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");
       case LLVMContext::MD_DIAssignID:
@@ -3181,45 +3133,6 @@ void llvm::copyMetadataForLoad(LoadInst &Dest, const LoadInst &Source) {
       // All of these directly apply.
       Dest.setMetadata(ID, N);
       break;
-
-    // [soundspec] Propagate !safe + !unsafe + !unsafe.xmit from source
-    // load onto the retyped clone. The clone is supposed to be a same-
-    // semantics retype of the source, so the scope tag(s) carry over
-    // directly.
-    case LLVMContext::MD_safe: {
-      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_safe);
-      (void)DestMD;
-      assert(!(DestMD && DestMD != N) && "Dest already has a !safe tag!");
-      Dest.setMetadata(ID, N);
-      break;
-    }
-    case LLVMContext::MD_unsafe: {
-      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_unsafe);
-      (void)DestMD;
-      assert(!(DestMD && DestMD != N) && "Dest already has an unsafe scope!");
-      Dest.setMetadata(ID, N);
-      break;
-    }
-    case LLVMContext::MD_unsafe_xmit: {
-      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_unsafe_xmit);
-      (void)DestMD;
-      assert(!(DestMD && DestMD != N) && "Dest already has an unsafe.xmit scope!");
-      Dest.setMetadata(ID, N);
-      break;
-    }
-
-    // [soundspec] Per-transmitter xmit-ID tag — must travel with the
-    // load so the verifier's "!safe transmitters should have
-    // !soundspec.xmit" check still passes after a retype. Same shape
-    // as MD_safe/MD_unsafe above.
-    case LLVMContext::MD_soundspec_xmit: {
-      MDNode *DestMD = Dest.getMetadata(LLVMContext::MD_soundspec_xmit);
-      (void)DestMD;
-      assert(!(DestMD && DestMD != N) &&
-             "Dest already has a !soundspec.xmit tag!");
-      Dest.setMetadata(ID, N);
-      break;
-    }
 
     case LLVMContext::MD_nonnull:
       copyNonnullMetadata(Source, N, Dest);

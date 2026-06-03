@@ -63,7 +63,6 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Type.h"
-#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
@@ -1109,32 +1108,6 @@ void ScopedAliasMetadataDeepCloner::remap(Function::iterator FStart,
     }
   }
 }
-
-namespace {
-/// Clones distinct `soundspec.store` MDNodes across an inlining boundary so
-/// each inlined store instance has its own identity. Two inlined copies of
-/// the same callee store thus carry different MDNodes, and a caller-side
-/// store sharing identity with a callee store gets a fresh MD in the inlined
-/// copy. Walks the inlined range and clones lazily, deduping so that all
-/// occurrences of the same source MDNode map to the same fresh clone.
-class SoundSpecStoreMetadataDeepCloner {
-  DenseMap<MDNode *, MDNode *> MDMap;
-
-public:
-  void remap(Function::iterator FStart, Function::iterator FEnd) {
-    for (BasicBlock &BB : make_range(FStart, FEnd))
-      for (Instruction &I : BB)
-        if (MDNode *MD = I.getMetadata(LLVMContext::MD_soundspec_store)) {
-          if (!MD->isDistinct())
-            continue;
-          auto [It, Inserted] = MDMap.try_emplace(MD, nullptr);
-          if (Inserted)
-            It->second = MDNode::getDistinct(MD->getContext(), {});
-          I.setMetadata(LLVMContext::MD_soundspec_store, It->second);
-        }
-  }
-};
-} // namespace
 
 /// If the inlined function has noalias arguments,
 /// then add new alias scopes for each noalias argument, tag the mapped noalias
@@ -2630,13 +2603,6 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
   assert(CalledFunc && !CalledFunc->isDeclaration() &&
          "CanInlineCallSite should have verified direct call to definition");
 
-  // SoundSpec: prepare the call site BEFORE cloning. Returns a cookie
-  // consumed by `postProcessInlinedBlocks` after cloning. Must run only
-  // when inlining is guaranteed to succeed — past CanInlineCallSite, so
-  // we're safe.
-  unsafe::InliningCookie SoundSpecCookie =
-      unsafe::prepareCallSiteForInlining(CB);
-
   // Determine if we are dealing with a call in an EHPad which does not unwind
   // to caller.
   bool EHPadForCallUnwindsLocally = false;
@@ -2754,12 +2720,6 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
     // Remember the first block that is newly cloned over.
     FirstNewBlock = LastBlock; ++FirstNewBlock;
 
-    // SoundSpec: translate per-instruction scope tags across the inline
-    // boundary. All cases (caller-unsafe-attr, !unsafe call, !safe call)
-    // handled by `postProcessInlinedBlocks` using the pre-clone cookie.
-    unsafe::postProcessInlinedBlocks(
-        llvm::make_range(FirstNewBlock, Caller->end()), SoundSpecCookie);
-
     // Insert retainRV/clainRV runtime calls.
     objcarc::ARCInstKind RVCallKind = objcarc::getAttachedARCFunctionKind(&CB);
     if (RVCallKind != objcarc::ARCInstKind::None)
@@ -2853,11 +2813,6 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
     SAMetadataCloner.clone();
     SAMetadataCloner.remap(FirstNewBlock, Caller->end());
 
-    // Give every inlined `soundspec.store` MDNode a fresh distinct identity so
-    // two inlined copies of the same callee store don't share identity, and so
-    // callee stores don't collide with caller stores.
-    SoundSpecStoreMetadataDeepCloner().remap(FirstNewBlock, Caller->end());
-
     // Add noalias metadata if necessary.
     AddAliasScopeMetadata(CB, VMap, DL, CalleeAAR, InlinedFunctionInfo);
 
@@ -2891,11 +2846,6 @@ void llvm::InlineFunctionImpl(CallBase &CB, InlineFunctionInfo &IFI,
         for (Instruction &I : NewBlock)
           if (auto *II = dyn_cast<AssumeInst>(&I))
             IFI.GetAssumptionCache(*Caller).registerAssumption(II);
-
-    // Export the value map to the caller if requested.
-    if (IFI.VMap)
-      for (auto Entry : VMap)
-        IFI.VMap->insert({Entry.first, Entry.second});
   }
 
   if (IFI.ConvergenceControlToken) {

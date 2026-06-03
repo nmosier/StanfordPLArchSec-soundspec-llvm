@@ -83,11 +83,6 @@ using namespace llvm;
 
 STATISTIC(NumArgumentsPromoted, "Number of pointer arguments promoted");
 STATISTIC(NumArgumentsDead, "Number of dead pointer args eliminated");
-STATISTIC(NumSoundSpecArgPromoBailed,
-          "[soundspec] argument promotions skipped because the callee "
-          "carries the `unsafe` attribute and lifting its loads into "
-          "(possibly non-unsafe-attr) callers would require synthesizing "
-          "a fresh unsafe scope ID");
 
 namespace {
 
@@ -95,13 +90,8 @@ struct ArgPart {
   Type *Ty;
   Align Alignment;
   /// A representative guaranteed-executed load or store instruction for use by
-  /// metadata transfer. Null when no must-execute representative exists.
+  /// metadata transfer.
   Instruction *MustExecInstr;
-  /// [soundspec] A representative load/store at this offset regardless of
-  /// guaranteed-to-execute status. Used solely to transfer SoundSpec scope
-  /// tags onto the synthesized caller-side load, since those tags are
-  /// instruction-identity (not context-dependent) and survive speculation.
-  Instruction *SoundSpecSource;
 };
 
 using OffsetAndArgPart = std::pair<int64_t, ArgPart>;
@@ -271,21 +261,6 @@ doPromotion(Function *F, FunctionAnalysisManager &FAM,
               LI->copyMetadata(*Pair.second.MustExecInstr,
                                Metadata::PoisonGeneratingIDs);
           }
-          // [soundspec] SoundSpec scope tags are instruction-identity and
-          // safe to transfer regardless of whether the original load/store
-          // was guaranteed to execute. Speculating the load at the call
-          // site doesn't change which scope its memory access belongs to.
-          // Exception: if the caller is `unsafe`-attr, the function
-          // attribute subsumes per-instruction tags, so the synthesized
-          // load must NOT carry !safe/!unsafe (the verifier rejects per-
-          // instruction scope tags inside unsafe-attr functions).
-          if (Pair.second.SoundSpecSource &&
-              !CB.getFunction()->hasFnAttribute(Attribute::Unsafe))
-            LI->copyMetadata(*Pair.second.SoundSpecSource,
-                             {LLVMContext::MD_safe,
-                              LLVMContext::MD_unsafe,
-                              LLVMContext::MD_unsafe_xmit,
-                              LLVMContext::MD_unsafe_spec});
           Args.push_back(LI);
           ArgAttrVec.push_back(AttributeSet());
         }
@@ -318,14 +293,7 @@ doPromotion(Function *F, FunctionAnalysisManager &FAM,
     NewCS->setAttributes(AttributeList::get(F->getContext(),
                                             CallPAL.getFnAttrs(),
                                             CallPAL.getRetAttrs(), ArgAttrVec));
-    // [soundspec] Carry SoundSpec scope tags onto the rewritten call —
-    // the verifier requires every CallBase to have !safe/!unsafe.
-    NewCS->copyMetadata(CB, {LLVMContext::MD_prof, LLVMContext::MD_dbg,
-                             LLVMContext::MD_safe,
-                             LLVMContext::MD_unsafe,
-                             LLVMContext::MD_unsafe_init,
-                             LLVMContext::MD_unsafe_xmit,
-                             LLVMContext::MD_unsafe_spec});
+    NewCS->copyMetadata(CB, {LLVMContext::MD_prof, LLVMContext::MD_dbg});
     Args.clear();
     ArgAttrVec.clear();
 
@@ -601,17 +569,9 @@ static bool findArgParts(Argument *Arg, const DataLayout &DL, AAResults &AAR,
 
     int64_t Off = Offset.getSExtValue();
     auto Pair = ArgParts.try_emplace(
-        Off, ArgPart{Ty, I->getAlign(),
-                     GuaranteedToExecute ? I : nullptr,
-                     /*SoundSpecSource=*/I});
+        Off, ArgPart{Ty, I->getAlign(), GuaranteedToExecute ? I : nullptr});
     ArgPart &Part = Pair.first->second;
     bool OffsetNotSeenBefore = Pair.second;
-    // [soundspec] First load/store seen at this offset wins as the scope
-    // source. (Later ones at the same offset must access the same type
-    // by the check below, so they're effectively duplicates; the first
-    // is as good as any.)
-    if (!OffsetNotSeenBefore && !Part.SoundSpecSource)
-      Part.SoundSpecSource = I;
 
     // We limit promotion to only promoting up to a fixed number of elements of
     // the aggregate.
@@ -838,18 +798,6 @@ static Function *promoteArguments(Function *F, FunctionAnalysisManager &FAM,
   // to in the assembly.
   if (F->hasFnAttribute(Attribute::Naked))
     return nullptr;
-
-  // [soundspec] If the callee is `unsafe`-attr, the callee's instructions
-  // carry no per-instruction scope tags (the function attribute subsumes
-  // them). Lifting one of its loads into a (possibly non-unsafe-attr)
-  // caller would then leave a verifier-illegal untagged load. Fixing that
-  // properly would require synthesizing a fresh `!unsafe` scope ID in the
-  // caller, analogous to the inliner's unsafe-callee-into-safe-caller
-  // handling. For now, just bail.
-  if (F->hasFnAttribute(Attribute::Unsafe)) {
-    ++NumSoundSpecArgPromoBailed;
-    return nullptr;
-  }
 
   // Make sure that it is local to this module.
   if (!F->hasLocalLinkage())

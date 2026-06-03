@@ -40,7 +40,6 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
@@ -65,13 +64,6 @@ STATISTIC(NumDeadAlloca,    "Number of dead alloca's removed");
 STATISTIC(NumPHIInsert,     "Number of PHI nodes inserted");
 
 bool llvm::isAllocaPromotable(const AllocaInst *AI) {
-  // [soundspec] `!unsafe.init` is radioactive — LowerUnsafeInit should
-  // have eliminated all of them before mem2reg runs.
-  assert(!AI->getMetadata(LLVMContext::MD_unsafe_init) &&
-         "!unsafe.init alloca reached mem2reg; LowerUnsafeInit didn't run?");
-  // `!unsafe` on the alloca is fine — the rewrite paths propagate the
-  // `!unsafe` scope onto the values and derived checks they materialize.
-
   // Only allow direct and non-volatile loads and stores...
   for (const User *U : AI->users()) {
     if (const LoadInst *LI = dyn_cast<LoadInst>(U)) {
@@ -475,13 +467,6 @@ static void addAssumeNonNull(AssumptionCache *AC, LoadInst *LI) {
   CallInst *CI = CallInst::Create(AssumeIntrinsic, {LoadNotNull});
   CI->insertAfter(LoadNotNull->getIterator());
   AC->registerAssumption(cast<AssumeInst>(CI));
-  // [soundspec] Propagate the load's `!unsafe` scope onto the
-  // materialized non-null check + assume so speculation suppression
-  // extends to the derived check at the load's former program point.
-  if (MDNode *UnsafeMD = LI->getMetadata(LLVMContext::MD_unsafe)) {
-    LoadNotNull->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
-    CI->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
-  }
 }
 
 static void convertMetadataToAssumes(LoadInst *LI, Value *Val,
@@ -490,14 +475,9 @@ static void convertMetadataToAssumes(LoadInst *LI, Value *Val,
   if (isa<UndefValue>(Val) && LI->hasMetadata(LLVMContext::MD_noundef)) {
     // Insert non-terminator unreachable.
     LLVMContext &Ctx = LI->getContext();
-    StoreInst *Unreach =
-        new StoreInst(ConstantInt::getTrue(Ctx),
-                      PoisonValue::get(PointerType::getUnqual(Ctx)),
-                      /*isVolatile=*/false, Align(1), LI->getIterator());
-    // [soundspec] Propagate the load's `!unsafe` scope onto the
-    // materialized-UB store.
-    if (MDNode *UnsafeMD = LI->getMetadata(LLVMContext::MD_unsafe))
-      Unreach->setMetadata(LLVMContext::MD_unsafe, UnsafeMD);
+    new StoreInst(ConstantInt::getTrue(Ctx),
+                  PoisonValue::get(PointerType::getUnqual(Ctx)),
+                  /*isVolatile=*/false, Align(1), LI->getIterator());
     return;
   }
 
@@ -604,8 +584,8 @@ static bool rewriteSingleStoreAlloca(
     }
 
     // Otherwise, we *can* safely rewrite this load.
-    // If the replacement value is the load itself, this must occur in
-    // unreachable code; substitute poison.
+    // If the replacement value is the load, this must occur in unreachable
+    // code.
     if (ReplVal == LI)
       ReplVal = PoisonValue::get(LI->getType());
 
@@ -711,14 +691,15 @@ static bool promoteSingleBlockAlloca(
         // by the following stores - see main comment).
         return false;
     } else {
-      // Otherwise, there was a store before this load, the load takes its value.
+      // Otherwise, there was a store before this load, the load takes its
+      // value.
       ReplVal = std::prev(I)->second->getOperand(0);
     }
 
     convertMetadataToAssumes(LI, ReplVal, DL, AC, &DT);
 
-    // If the replacement value is the load itself, this must occur in
-    // unreachable code; substitute poison.
+    // If the replacement value is the load, this must occur in unreachable
+    // code.
     if (ReplVal == LI)
       ReplVal = PoisonValue::get(LI->getType());
 
@@ -1181,7 +1162,6 @@ void PromoteMem2Reg::RenamePass(BasicBlock *BB, BasicBlock *Pred) {
         continue;
 
       Value *V = IncomingVals[AI->second];
-
       convertMetadataToAssumes(LI, V, SQ.DL, AC, &DT);
 
       // Anything using the load now uses the current value.

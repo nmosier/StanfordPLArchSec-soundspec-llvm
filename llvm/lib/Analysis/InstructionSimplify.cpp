@@ -6534,19 +6534,6 @@ static Value *simplifyUnaryIntrinsic(Function *F, Value *Op0,
     if (isSplatValue(Op0))
       return Op0;
     break;
-  case Intrinsic::unsafe_shadow_arg:
-    // SoundSpec: `shadow.arg(const)` has a fully compile-time-known input,
-    // so no runtime dataflow link needs to survive — fold to the canonical
-    // zero shadow token. Mirrors the `shadow.embed(%v, const) -> %v` fold
-    // in `simplifyBinaryIntrinsic`.
-    if (isa<Constant>(Op0))
-      return ConstantInt::get(F->getReturnType(), 0);
-    // SoundSpec: `shadow.arg(shadow.embed(%v, %tok)) -> %tok`. The embed's
-    // token *is* the shadow that downstream consumers should observe.
-    if (match(Op0, m_Intrinsic<Intrinsic::unsafe_shadow_embed>(m_Value(),
-                                                               m_Value(X))))
-      return X;
-    break;
   default:
     break;
   }
@@ -7137,24 +7124,6 @@ Value *llvm::simplifyBinaryIntrinsic(Intrinsic::ID IID, Type *ReturnType,
   case Intrinsic::aarch64_sve_umaxv:
   case Intrinsic::aarch64_sve_uminv:
     return simplifySVEIntReduction(IID, ReturnType, Op0, Op1);
-  case Intrinsic::unsafe_shadow_dep:
-    // SoundSpec: `shadow.dep` is idempotent — `dep(x, x) → x`. The two
-    // arguments are SoundSpec shadow tokens; a token combined with
-    // itself produces the same token. Folding here lets InstSimplify /
-    // InstCombine eliminate `dep(%x, %x)` calls that downstream
-    // optimizations (e.g., value-numbering rewrites) can synthesize
-    // even when the original SoundSpec pass never emitted them.
-    if (Op0 == Op1)
-      return Op0;
-    break;
-  case Intrinsic::unsafe_shadow_embed:
-    // SoundSpec: `shadow.embed(%v, %tok)` is a passthrough on %v. When
-    // %tok is a Constant the shadow token is fully known at compile
-    // time, so no runtime dataflow link needs to survive — fold the
-    // call to %v directly.
-    if (isa<Constant>(Op1))
-      return Op0;
-    break;
   default:
     break;
   }

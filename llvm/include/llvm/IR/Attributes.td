@@ -304,13 +304,6 @@ def StackAlignment : IntAttr<"alignstack", IntersectPreserve, [FnAttr, ParamAttr
 /// Function can be speculated.
 def Speculatable : EnumAttr<"speculatable", IntersectAnd, [FnAttr]>;
 
-/// Function is idempotent: calling it N times with identical arguments has
-/// the same observable effect as calling it once, regardless of intervening
-/// operations. Modeled on monotonic latched effects (e.g. "set this bit"):
-/// the effect is stable and re-applying it is a no-op. Permits aggressive
-/// elimination of redundant calls even when the call is side-effecting.
-def Idempotent : EnumAttr<"idempotent", IntersectAnd, [FnAttr]>;
-
 /// Stack protection.
 def StackProtect : EnumAttr<"ssp", IntersectPreserve, [FnAttr]>;
 
@@ -354,6 +347,13 @@ def SanitizeRealtime : EnumAttr<"sanitize_realtime", IntersectPreserve, [FnAttr]
 /// during a real-time sanitized function (see `sanitize_realtime`).
 def SanitizeRealtimeBlocking : EnumAttr<"sanitize_realtime_blocking", IntersectPreserve, [FnAttr]>;
 
+/// SoundSpec: this parameter is unsafe (speculation-tainted) at the
+/// call site. Used by rustc to mark the `self` operand of dyn-trait
+/// virtual dispatches so the SoundSpec analysis can see the taint
+/// even when `CallBase::getParamAttr` can't resolve through the
+/// indirect function pointer to the callee declaration.
+def SoundSpecArgUnsafe : EnumAttr<"soundspec_arg_unsafe", IntersectPreserve, [ParamAttr]>;
+
 /// Allocation token instrumentation is on.
 def SanitizeAllocToken : EnumAttr<"sanitize_alloc_token", IntersectPreserve, [FnAttr]>;
 
@@ -375,23 +375,6 @@ def SwiftSelf : EnumAttr<"swiftself", IntersectPreserve, [ParamAttr]>;
 
 /// Argument is swift async context.
 def SwiftAsync : EnumAttr<"swiftasync", IntersectPreserve, [ParamAttr]>;
-
-/// SoundSpec: function body is speculation-unsafe in its entirety.
-/// Equivalent to tagging every instruction with `!unsafe` metadata, but
-/// expressed at the function level so the per-instruction metadata is
-/// unnecessary inside such functions. The inliner is responsible for
-/// translating between the two representations across inline boundaries.
-def Unsafe : EnumAttr<"unsafe", IntersectPreserve, [FnAttr]>;
-
-/// SoundSpec: 32-bit CFI label assigned to this function. The label is
-/// authoritative for SoundSpec's hardware CFI scheme — it identifies the
-/// equivalence class of legal indirect-call destinations.
-def SoundSpecCfi : IntAttr<"soundspec_cfi", IntersectPreserve, [FnAttr]>;
-
-/// SoundSpec: parameter value is taint-carrying with respect to the
-/// unsafe-scope analysis. Treated as if the corresponding argument
-/// originated inside an unsafe scope at the call site.
-def SoundSpecArgUnsafe : EnumAttr<"soundspec_arg_unsafe", IntersectPreserve, [ParamAttr]>;
 
 /// Function must be in a unwind table.
 def UWTable : IntAttr<"uwtable", IntersectPreserve, [FnAttr]>;

@@ -22,6 +22,7 @@
 #include "X86MachineFunctionInfo.h"
 #include "X86RegisterInfo.h"
 #include "X86ShuffleDecodeConstantPool.h"
+#include "X86SoundSpecInfo.h"
 #include "X86Subtarget.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
@@ -409,6 +410,13 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   for (const MachineOperand &MO : MI->operands())
     if (auto Op = LowerMachineOperand(MI, MO); Op.isValid())
       OutMI.addOperand(Op);
+
+  // SoundSpec: tag the MCInst when the source MI is a speculation primitive
+  // that wasn't marked `safe`. Encoded as IP_HAS_UNSAFE in MCInst::Flags;
+  // X86MCCodeEmitter emits a 0x36 (legacy SS, repurposed) prefix byte.
+  if (!MI->getFlag(MachineInstr::MIFlag::Safe) &&
+      X86::soundspec::maybeSpeculationPrimitive(*MI))
+    OutMI.setFlags(OutMI.getFlags() | X86::IP_HAS_UNSAFE);
 
   bool In64BitMode = AsmPrinter.getSubtarget().is64Bit();
   if (X86::optimizeInstFromVEX3ToVEX2(OutMI, MI->getDesc()) ||

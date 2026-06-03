@@ -19,7 +19,6 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Transforms/InstCombine/InstCombiner.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -30,11 +29,6 @@ using namespace PatternMatch;
 
 STATISTIC(NumDeadStore, "Number of dead stores eliminated");
 STATISTIC(NumGlobalCopies, "Number of allocas copied from constant global");
-STATISTIC(NumSoundSpecLoadSelectBailed,
-          "[soundspec] load(select(...)) -> select(load, load) folds "
-          "skipped because the enclosing function lacks the `unsafe` "
-          "attribute and the fold would speculate both loads outside "
-          "any tracked scope");
 
 static cl::opt<unsigned> MaxCopiedFromConstantUsers(
     "instcombine-max-copied-from-constant-users", cl::init(300),
@@ -656,19 +650,6 @@ static StoreInst *combineStoreToNewValue(InstCombinerImpl &IC, StoreInst &SI,
       // All of these directly apply.
       NewStore->setMetadata(ID, N);
       break;
-    // [soundspec] Propagate !safe + !unsafe + !unsafe.xmit +
-    // !unsafe.init + !unsafe.spec from the source store onto the
-    // retyped clone. The clone is supposed to be a same-semantics
-    // retype, so the scope tag(s) carry over directly. (Stores are
-    // both transmitters and speculation primitives, so all five tags
-    // can legitimately appear.)
-    case LLVMContext::MD_safe:
-    case LLVMContext::MD_unsafe:
-    case LLVMContext::MD_unsafe_xmit:
-    case LLVMContext::MD_unsafe_init:
-    case LLVMContext::MD_unsafe_spec:
-      NewStore->setMetadata(ID, N);
-      break;
     case LLVMContext::MD_invariant_load:
     case LLVMContext::MD_nonnull:
     case LLVMContext::MD_noundef:
@@ -765,14 +746,8 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
       LoadInst *NewLoad = IC.combineLoadToNewType(LI, ST->getTypeAtIndex(0U),
                                                   ".unpack");
       NewLoad->setAAMetadata(LI.getAAMetadata());
-      // Copy invariant metadata + SoundSpec scope/xmit tags. The verifier
-      // requires !safe transmitters to carry !soundspec.xmit, so the full
-      // SoundSpec quartet has to ride along.
-      NewLoad->copyMetadata(LI, {LLVMContext::MD_invariant_load,
-                                 LLVMContext::MD_safe,
-                                 LLVMContext::MD_unsafe,
-                                 LLVMContext::MD_unsafe_xmit,
-                                 LLVMContext::MD_soundspec_xmit});
+      // Copy invariant metadata from parent load.
+      NewLoad->copyMetadata(LI, LLVMContext::MD_invariant_load);
       return IC.replaceInstUsesWith(LI, IC.Builder.CreateInsertValue(
         PoisonValue::get(T), NewLoad, 0, Name));
     }
@@ -800,14 +775,8 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
           Name + ".unpack");
       // Propagate AA metadata. It'll still be valid on the narrowed load.
       L->setAAMetadata(LI.getAAMetadata());
-      // Copy invariant metadata + SoundSpec scope/xmit tags. The verifier
-      // requires !safe transmitters to carry !soundspec.xmit, so the full
-      // SoundSpec quartet has to ride along.
-      L->copyMetadata(LI, {LLVMContext::MD_invariant_load,
-                           LLVMContext::MD_safe,
-                           LLVMContext::MD_unsafe,
-                           LLVMContext::MD_unsafe_xmit,
-                           LLVMContext::MD_soundspec_xmit});
+      // Copy invariant metadata from parent load.
+      L->copyMetadata(LI, LLVMContext::MD_invariant_load);
       V = IC.Builder.CreateInsertValue(V, L, i);
     }
 
@@ -821,11 +790,6 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
     if (NumElements == 1) {
       LoadInst *NewLoad = IC.combineLoadToNewType(LI, ET, ".unpack");
       NewLoad->setAAMetadata(LI.getAAMetadata());
-      // Copy SoundSpec scope/xmit tags (see struct-path comment).
-      NewLoad->copyMetadata(LI, {LLVMContext::MD_safe,
-                                 LLVMContext::MD_unsafe,
-                                 LLVMContext::MD_unsafe_xmit,
-                                 LLVMContext::MD_soundspec_xmit});
       return IC.replaceInstUsesWith(LI, IC.Builder.CreateInsertValue(
         PoisonValue::get(T), NewLoad, 0, Name));
     }
@@ -858,11 +822,6 @@ static Instruction *unpackLoadToAggregate(InstCombinerImpl &IC, LoadInst &LI) {
       auto *L = IC.Builder.CreateAlignedLoad(AT->getElementType(), Ptr,
                                              EltAlign, Name + ".unpack");
       L->setAAMetadata(LI.getAAMetadata());
-      // Copy SoundSpec scope/xmit tags (see struct-path comment).
-      L->copyMetadata(LI, {LLVMContext::MD_safe,
-                           LLVMContext::MD_unsafe,
-                           LLVMContext::MD_unsafe_xmit,
-                           LLVMContext::MD_soundspec_xmit});
       V = IC.Builder.CreateInsertValue(V, L, i);
       Offset += EltSize;
     }
@@ -1180,14 +1139,6 @@ Instruction *InstCombinerImpl::visitLoadInst(LoadInst &LI) {
     //
     if (SelectInst *SI = dyn_cast<SelectInst>(Op)) {
       // load (select (Cond, &V1, &V2))  --> select(Cond, load &V1, load &V2).
-      // [soundspec] The fold speculates both loads, doubling the number
-      // of protected transmitters. Skip when the enclosing function lacks
-      // `unsafe` attr — there's no defensible single scope for the new
-      // pair derived from one original load.
-      if (!LI.getFunction()->hasFnAttribute(Attribute::Unsafe)) {
-        ++NumSoundSpecLoadSelectBailed;
-        return nullptr;
-      }
       Align Alignment = LI.getAlign();
       if (isSafeToLoadUnconditionally(SI->getOperand(1), LI.getType(),
                                       Alignment, DL, SI) &&
@@ -1707,17 +1658,6 @@ bool InstCombinerImpl::mergeStoreIntoSuccessor(StoreInst &SI) {
   AAMDNodes AATags = SI.getAAMetadata();
   if (AATags)
     NewSI->setAAMetadata(AATags.merge(OtherStore->getAAMetadata()));
-
-  // [soundspec] The merged store stands in for both originals. Just
-  // union the scope sets — the verifier no longer requires a single
-  // dominating gen per scope.
-  if (MDNode *Merged = unsafe::mergeMetadata(
-          SI.getMetadata(LLVMContext::MD_unsafe),
-          OtherStore->getMetadata(LLVMContext::MD_unsafe)))
-    NewSI->setMetadata(LLVMContext::MD_unsafe, Merged);
-  else if (MDNode *SISafe = SI.getMetadata(LLVMContext::MD_safe))
-    if (OtherStore->getMetadata(LLVMContext::MD_safe))
-      NewSI->setMetadata(LLVMContext::MD_safe, SISafe);
 
   // Nuke the old stores.
   eraseInstFromFunction(SI);

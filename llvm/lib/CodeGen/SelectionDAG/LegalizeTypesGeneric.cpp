@@ -618,23 +618,3 @@ void DAGTypeLegalizer::SplitRes_ARITH_FENCE(SDNode *N, SDValue &Lo,
   Lo = DAG.getNode(ISD::ARITH_FENCE, DL, L.getValueType(), L);
   Hi = DAG.getNode(ISD::ARITH_FENCE, DL, H.getValueType(), H);
 }
-
-// SoundSpec passthrough marker (UNSAFE_SHADOW_EMBED). Split operand 0 into
-// Lo/Hi halves and rebuild the same opcode on each half, threading any
-// trailing operands (e.g. the shadow token) through both copies.
-void DAGTypeLegalizer::SplitRes_UNSAFE_SHADOW_EMBED(SDNode *N, SDValue &Lo,
-                                                    SDValue &Hi) {
-  SDValue L, H;
-  SDLoc DL(N);
-  GetSplitOp(N->getOperand(0), L, H);
-
-  SmallVector<SDValue, 2> LoOps, HiOps;
-  LoOps.push_back(L);
-  HiOps.push_back(H);
-  for (unsigned I = 1, E = N->getNumOperands(); I != E; ++I) {
-    LoOps.push_back(N->getOperand(I));
-    HiOps.push_back(N->getOperand(I));
-  }
-  Lo = DAG.getNode(N->getOpcode(), DL, L.getValueType(), LoOps);
-  Hi = DAG.getNode(N->getOpcode(), DL, H.getValueType(), HiOps);
-}

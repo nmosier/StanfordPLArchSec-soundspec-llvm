@@ -2130,16 +2130,6 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::MEMBARRIER:
         OutStreamer->emitRawComment("MEMBARRIER");
         break;
-      case TargetOpcode::UNSAFE_SHADOW_EMBED:
-        // UNSAFE_SHADOW_EMBED is an abstract meta pseudo emitted by X86 ISel
-        // that X86SoundSpecMIROptimizer (addPreEmitPass2) MUST lower into a
-        // concrete SOUNDSPEC_PROTECT_GR{32,64} or LFENCE before AsmPrinter.
-        // Reaching here means the optimizer missed one; silently stripping
-        // would drop SoundSpec protection without anyone noticing, so fail
-        // loudly instead.
-        llvm_unreachable(
-            "UNSAFE_SHADOW_EMBED meta pseudo reached AsmPrinter — "
-            "X86SoundSpecMIROptimizer should have lowered it");
       case TargetOpcode::JUMP_TABLE_DEBUG_INFO:
         // This instruction is only used to note jump table debug info, it's
         // purely meta information.

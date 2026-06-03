@@ -14,6 +14,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/Dominators.h"
@@ -21,6 +22,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/SoundSpec.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/DebugCounter.h"
@@ -38,6 +40,13 @@ DEBUG_COUNTER(RenameCounter, "predicateinfo-rename",
 // Maximum number of conditions considered for renaming for each branch/assume.
 // This limits renaming of deep and/or chains.
 static const unsigned MaxCondsPerBranch = 8;
+
+STATISTIC(soundspecPredicateInfoBranchBails,
+          "[soundspec] Number of PredicateBranch insertions skipped due to "
+          "safe terminator");
+STATISTIC(soundspecPredicateInfoSwitchBails,
+          "[soundspec] Number of PredicateSwitch insertions skipped due to "
+          "safe terminator");
 
 namespace {
 // Given a predicate info that is a type of branching terminator, get the
@@ -398,6 +407,15 @@ void PredicateInfoBuilder::processAssume(
 void PredicateInfoBuilder::processBranch(
     BranchInst *BI, BasicBlock *BranchBB,
     SmallVectorImpl<Value *> &OpsToRename) {
+  // SoundSpec: a `!safe` branch is a per-edge safety attestation, not a
+  // universal value fact. Refuse to materialize PredicateBranch edge copies
+  // from its condition — that suppresses edge-specific renaming in SCCP,
+  // NewGVN, FunctionSpecialization, and any other PredicateInfo consumer.
+  if (soundspec::EnableSoundSpec && soundspec::isSafe(*BI)) {
+    ++soundspecPredicateInfoBranchBails;
+    return;
+  }
+
   BasicBlock *FirstBB = BI->getSuccessor(0);
   BasicBlock *SecondBB = BI->getSuccessor(1);
 
@@ -447,6 +465,13 @@ void PredicateInfoBuilder::processBranch(
 void PredicateInfoBuilder::processSwitch(
     SwitchInst *SI, BasicBlock *BranchBB,
     SmallVectorImpl<Value *> &OpsToRename) {
+  // SoundSpec: a `!safe` switch is a per-edge safety attestation, not a
+  // universal value fact. See processBranch for rationale.
+  if (soundspec::EnableSoundSpec && soundspec::isSafe(*SI)) {
+    ++soundspecPredicateInfoSwitchBails;
+    return;
+  }
+
   Value *Op = SI->getCondition();
   if ((!isa<Instruction>(Op) && !isa<Argument>(Op)) || Op->hasOneUse())
     return;

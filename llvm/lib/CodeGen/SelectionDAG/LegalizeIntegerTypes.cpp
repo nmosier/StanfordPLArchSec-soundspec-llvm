@@ -334,9 +334,6 @@ void DAGTypeLegalizer::PromoteIntegerResult(SDNode *N, unsigned ResNo) {
   case ISD::FREEZE:
     Res = PromoteIntRes_FREEZE(N);
     break;
-  case ISD::UNSAFE_SHADOW_EMBED:
-    Res = PromoteIntRes_UNSAFE_SHADOW_EMBED(N);
-    break;
 
   case ISD::ROTL:
   case ISD::ROTR:
@@ -644,19 +641,6 @@ SDValue DAGTypeLegalizer::PromoteIntRes_FREEZE(SDNode *N) {
   SDValue V = GetPromotedInteger(N->getOperand(0));
   return DAG.getNode(ISD::FREEZE, SDLoc(N),
                      V.getValueType(), V);
-}
-
-// SoundSpec passthrough marker (UNSAFE_SHADOW_EMBED): promote operand 0's
-// type to a legal integer, then rebuild the same opcode with the promoted
-// operand. Any trailing operands (e.g. the shadow token) are preserved
-// as-is.
-SDValue DAGTypeLegalizer::PromoteIntRes_UNSAFE_SHADOW_EMBED(SDNode *N) {
-  SDValue V = GetPromotedInteger(N->getOperand(0));
-  SmallVector<SDValue, 2> Ops;
-  Ops.push_back(V);
-  for (unsigned I = 1, E = N->getNumOperands(); I != E; ++I)
-    Ops.push_back(N->getOperand(I));
-  return DAG.getNode(N->getOpcode(), SDLoc(N), V.getValueType(), Ops);
 }
 
 SDValue DAGTypeLegalizer::PromoteIntRes_BSWAP(SDNode *N) {
@@ -2079,9 +2063,6 @@ bool DAGTypeLegalizer::PromoteIntegerOperand(SDNode *N, unsigned OpNo) {
   case ISD::FAKE_USE:
     Res = PromoteIntOp_FAKE_USE(N);
     break;
-  case ISD::UNSAFE_SHADOW_ARG:
-    Res = PromoteIntOp_UNSAFE_SHADOW_ARG(N);
-    break;
   case ISD::INSERT_VECTOR_ELT:
     Res = PromoteIntOp_INSERT_VECTOR_ELT(N, OpNo);
     break;
@@ -3065,7 +3046,6 @@ void DAGTypeLegalizer::ExpandIntegerResult(SDNode *N, unsigned ResNo) {
                        "operator!");
 
   case ISD::ARITH_FENCE:  SplitRes_ARITH_FENCE(N, Lo, Hi); break;
-  case ISD::UNSAFE_SHADOW_EMBED: SplitRes_UNSAFE_SHADOW_EMBED(N, Lo, Hi); break;
   case ISD::MERGE_VALUES: SplitRes_MERGE_VALUES(N, ResNo, Lo, Hi); break;
   case ISD::SELECT:       SplitRes_Select(N, Lo, Hi); break;
   case ISD::SELECT_CC:    SplitRes_SELECT_CC(N, Lo, Hi); break;
@@ -5565,9 +5545,6 @@ bool DAGTypeLegalizer::ExpandIntegerOperand(SDNode *N, unsigned OpNo) {
   case ISD::FAKE_USE:
     Res = ExpandOp_FAKE_USE(N);
     break;
-  case ISD::UNSAFE_SHADOW_ARG:
-    Res = ExpandIntOp_UNSAFE_SHADOW_ARG(N);
-    break;
   case ISD::INSERT_VECTOR_ELT: Res = ExpandOp_INSERT_VECTOR_ELT(N); break;
   case ISD::SCALAR_TO_VECTOR:  Res = ExpandOp_SCALAR_TO_VECTOR(N); break;
   case ISD::SPLAT_VECTOR:      Res = ExpandIntOp_SPLAT_VECTOR(N); break;
@@ -6467,31 +6444,6 @@ SDValue DAGTypeLegalizer::PromoteIntOp_FAKE_USE(SDNode *N) {
       DAG.getNode(ISD::ANY_EXTEND, dl,
                   TLI.getTypeToTransformTo(*DAG.getContext(), InVT1), V1);
   return DAG.getNode(N->getOpcode(), dl, N->getValueType(0), V0, VPromoted);
-}
-
-// SoundSpec: `UNSAFE_SHADOW_ARG` is target-lowered (e.g. X86 emits
-// UNSAFE_ARG_GR32/GR64), so the operand's actual value matters only
-// insofar as the target ISel needs a legal-typed source register. Promote
-// any sub-legal integer operand via ANY_EXTEND so the X86 ISel sees i32
-// (and routes to UNSAFE_ARG_GR32) instead of an illegal i8/i16/i1.
-SDValue DAGTypeLegalizer::PromoteIntOp_UNSAFE_SHADOW_ARG(SDNode *N) {
-  SDLoc dl(N);
-  SDValue Arg = N->getOperand(0);
-  EVT InVT = Arg.getValueType();
-  SDValue ArgPromoted = DAG.getNode(
-      ISD::ANY_EXTEND, dl,
-      TLI.getTypeToTransformTo(*DAG.getContext(), InVT), Arg);
-  return DAG.getNode(N->getOpcode(), dl, N->getValueType(0), ArgPromoted);
-}
-
-// SoundSpec: see comment above on the promote handler. For an over-wide
-// integer operand, take the low half of the expansion. The framework will
-// recursively expand again if `Lo` is itself still illegal (e.g. i256 →
-// i128 → i64).
-SDValue DAGTypeLegalizer::ExpandIntOp_UNSAFE_SHADOW_ARG(SDNode *N) {
-  SDValue Lo, Hi;
-  GetExpandedInteger(N->getOperand(0), Lo, Hi);
-  return DAG.getNode(N->getOpcode(), SDLoc(N), N->getValueType(0), Lo);
 }
 
 SDValue DAGTypeLegalizer::PromoteIntOp_EXTRACT_SUBVECTOR(SDNode *N) {

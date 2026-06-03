@@ -2212,6 +2212,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::SanitizeRealtime;
   case bitc::ATTR_KIND_SANITIZE_REALTIME_BLOCKING:
     return Attribute::SanitizeRealtimeBlocking;
+  case bitc::ATTR_KIND_SOUNDSPEC_ARG_UNSAFE:
+    return Attribute::SoundSpecArgUnsafe;
   case bitc::ATTR_KIND_SANITIZE_ALLOC_TOKEN:
     return Attribute::SanitizeAllocToken;
   case bitc::ATTR_KIND_SPECULATIVE_LOAD_HARDENING:
@@ -2268,14 +2270,6 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::DeadOnReturn;
   case bitc::ATTR_KIND_NO_CREATE_UNDEF_OR_POISON:
     return Attribute::NoCreateUndefOrPoison;
-  case bitc::ATTR_KIND_UNSAFE:
-    return Attribute::Unsafe;
-  case bitc::ATTR_KIND_SOUNDSPEC_CFI:
-    return Attribute::SoundSpecCfi;
-  case bitc::ATTR_KIND_SOUNDSPEC_ARG_UNSAFE:
-    return Attribute::SoundSpecArgUnsafe;
-  case bitc::ATTR_KIND_IDEMPOTENT:
-    return Attribute::Idempotent;
   }
 }
 
@@ -2416,8 +2410,6 @@ Error BitcodeReader::parseAttributeGroupBlock() {
             B.addVScaleRangeAttrFromRawRepr(Record[++i]);
           else if (Kind == Attribute::UWTable)
             B.addUWTableAttr(UWTableKind(Record[++i]));
-          else if (Kind == Attribute::SoundSpecCfi)
-            B.addSoundSpecCfiAttr(static_cast<uint32_t>(Record[++i]));
           else if (Kind == Attribute::AllocKind)
             B.addAllocKindAttr(static_cast<AllocFnKind>(Record[++i]));
           else if (Kind == Attribute::Memory) {

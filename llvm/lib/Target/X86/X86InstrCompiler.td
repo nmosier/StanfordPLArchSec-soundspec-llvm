@@ -315,95 +315,14 @@ def SOUNDSPEC_CFI_SRC : PseudoI<
   let AsmString = "soundspec_cfi_src\t$id";
 }
 
-// SoundSpec scope-stack ops share a SoundSpec sub-table at TB opcode 0x19,
-// all mod=11 register form. Each takes a single GR32 operand that is both
-// READ AND WRITTEN (tied $src = $dst); the register encoded in r/m carries
-// the Mask both in and out of the operation:
-//
-//   /0 r/m=rrr ->  SOUNDSPEC_PUSH_UNSAFE  $reg   0F 19 11.000.rrr
-//   /1 r/m=rrr ->  SOUNDSPEC_PUSH_SAFE    $reg   0F 19 11.001.rrr
-//   /2 r/m=rrr ->  SOUNDSPEC_POP          $reg   0F 19 11.010.rrr
-//
-// `0F 19` (along with 0F 1A–0F 1F) sits in the multi-byte-NOP/PREFETCH
-// reserved-hint region. Mod=11 forms of these are #UD on current x86,
-// so SoundSpec silicon can repurpose them. We *do* expose these to the
-// disassembler/asm-parser so `llvm-objdump` / `lldb` render SoundSpec
-// instructions with their real mnemonics instead of as generic NOPs.
-// mayLoad / mayStore / hasSideEffects are inferred by tablegen from each
-// intrinsic's `IntrWrite<[InaccessibleMem]>` memory-effect attribute:
-// writeonly inaccessible → mayStore = 1, which is sufficient to block DCE,
-// CSE, and reordering in either direction (no MMO on the pseudo keeps alias
-// analysis maximally conservative).
-let Constraints = "$src = $dst" in {
-  def SOUNDSPEC_PUSH_UNSAFE
-      : I<0x19, MRM0r, (outs GR32:$dst), (ins GR32:$src),
-          "soundspec_push_unsafe\t$dst",
-          [(set GR32:$dst, (int_soundspec_push_unsafe GR32:$src))]>,
-        TB, Sched<[]>;
-  def SOUNDSPEC_PUSH_SAFE
-      : I<0x19, MRM1r, (outs GR32:$dst), (ins GR32:$src),
-          "soundspec_push_safe\t$dst",
-          [(set GR32:$dst, (int_soundspec_push_safe GR32:$src))]>,
-        TB, Sched<[]>;
-  def SOUNDSPEC_POP
-      : I<0x19, MRM2r, (outs GR32:$dst), (ins GR32:$src),
-          "soundspec_pop\t$dst",
-          [(set GR32:$dst, (int_soundspec_pop GR32:$src))]>,
-        TB, Sched<[]>;
-}
-// SOUNDSPEC_PROTECT_GR{32,64} mark a GPR data value as data-dependent on
-// a dep token. Encoded as `0F 1E 11.ddd.sss` (GR32) or
-// `REX.W 0F 1E 11.ddd.sss` (GR64) — TB prefix, opcode 0x1E, MRMSrcReg
-// form. The reg field (ddd) carries the data/dst GPR; the r/m field
-// (sss) carries the dep GPR. The data register width selects between
-// the 32-bit and 64-bit forms, mirroring `mov eax, ebx` vs `mov rax,
-// rbx`. Passthrough: $data is tied to $dst so the data register is
-// unchanged at the value level. Maps to
-// `llvm.unsafe.shadow.embed(data, tok)`. `0F 1E` is reserved-NOP space
-// on modern x86; exposed to the disassembler/asm-parser so SoundSpec
-// instructions render with their real mnemonics.
-let Constraints = "$data = $dst", hasSideEffects = 1, mayLoad = 0,
-    mayStore = 0 in {
-  def SOUNDSPEC_PROTECT_GR32 : I<0x1E, MRMSrcReg, (outs GR32:$dst),
-                                 (ins GR32:$data, GR32:$dep),
-                                 "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
-                                 []>, TB, Sched<[]>;
-  def SOUNDSPEC_PROTECT_GR64 : RI<0x1E, MRMSrcReg, (outs GR64:$dst),
-                                  (ins GR64:$data, GR64:$dep),
-                                  "soundspec_protect_gpr\t{$dep, $data|$data, $dep}",
-                                  []>, TB, Sched<[]>;
-}
-
-// UNSAFE_ARG_GR{32,64} produce the SoundSpec shadow token derived from a
-// GPR input. Encoded as `0F 1D 11.ddd.sss` (GR32) or
-// `REX.W 0F 1D 11.ddd.sss` (GR64) — TB prefix, opcode 0x1D, MRMSrcReg form.
-// The reg field (ddd) carries the destination GPR; the r/m field (sss)
-// carries the source GPR. Width selects between the 32-bit and 64-bit
-// forms, mirroring `mov eax, ebx` vs `mov rax, rbx`. Maps to
-// `llvm.unsafe.shadow.arg(value)`. `0F 1D` is reserved-NOP territory on
-// modern x86; exposed to the disassembler/asm-parser so SoundSpec
-// instructions render with their real mnemonics.
+// SoundSpec UNSAFE_POST marker — encoded as `0F 19 C0` (TB-prefixed opcode
+// 0x19 with fixed ModR/M = 0xC0, i.e. mod=11/reg=000/r/m=000). Sits in the
+// `0F 19` reserved no-op space, where mod=11 forms are #UD on stock x86.
+// No inputs or outputs; carries hasSideEffects so MIR passes don't drop,
+// CSE, or reorder it.
 let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in {
-  def UNSAFE_ARG_GR32 : I<0x1D, MRMSrcReg, (outs GR32:$dst), (ins GR32:$src),
-                          "unsafe_arg\t{$src, $dst|$dst, $src}",
-                          []>, TB, Sched<[]>;
-  def UNSAFE_ARG_GR64 : RI<0x1D, MRMSrcReg, (outs GR64:$dst), (ins GR64:$src),
-                           "unsafe_arg\t{$src, $dst|$dst, $src}",
-                           []>, TB, Sched<[]>;
-}
-
-// UNSAFE_ARG_LFENCE is the fail-safe carrier for `llvm.unsafe.shadow.arg` of a
-// value whose register class has no `unsafe_arg` form (anything but GR32/GR64
-// — XMM, GR8/16, etc.). It produces the i32 shadow token, so it survives as a
-// real def consumed by downstream dep chains, and is lowered post-RA by
-// X86SoundSpecMIROptimizer into an `LFENCE` (the actual speculation barrier)
-// plus a zero token. `hasSideEffects` keeps it from being CSE'd/DCE'd; do NOT
-// set mayLoad/mayStore — that makes the DAG scheduler treat it as a load and
-// index load-address operands it doesn't have (ClusterNeighboringLoads). The
-// real barrier semantics come from the lowered LFENCE, and the token's data
-// dependency already pins this node before its uses.
-def UNSAFE_ARG_LFENCE : PseudoI<(outs GR32:$tok), (ins), []>, Sched<[]> {
-  let hasSideEffects = 1;
+  def UNSAFE_POST : I<0x19, MRM_C0, (outs), (ins), "unsafe_post", []>, TB,
+                    Sched<[]>;
 }
 
 //===----------------------------------------------------------------------===//

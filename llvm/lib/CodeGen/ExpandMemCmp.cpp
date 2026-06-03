@@ -267,16 +267,6 @@ MemCmpExpansion::MemCmpExpansion(
       IsUsedForZeroCmp(IsUsedForZeroCmp), DL(TheDataLayout), DTU(DTU),
       Builder(CI) {
   assert(Size > 0 && "zero blocks");
-  // [soundspec] Carry SoundSpec scope tags from the source memcmp/bcmp
-  // call onto every load/branch this expansion synthesizes. The expansion
-  // preserves the operation's memory effects on the same pointer operands,
-  // so the original !safe/!unsafe scope context applies to each piece
-  // unchanged.
-  Builder.CollectMetadataToCopy(CI, {LLVMContext::MD_safe,
-                                     LLVMContext::MD_unsafe,
-                                     LLVMContext::MD_unsafe_xmit,
-                                     LLVMContext::MD_unsafe_init,
-                                     LLVMContext::MD_unsafe_spec});
   // Scale the max size down if the target can load more bytes than we need.
   llvm::ArrayRef<unsigned> LoadSizes(Options.LoadSizes);
   while (!LoadSizes.empty() && LoadSizes.front() > Size) {

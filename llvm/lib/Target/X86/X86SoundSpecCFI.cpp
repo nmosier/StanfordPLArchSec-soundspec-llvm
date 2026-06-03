@@ -12,12 +12,14 @@
 ///
 //===----------------------------------------------------------------------===//
 
+#include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/SoundSpec.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/IR/Function.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -42,6 +44,9 @@ struct X86SoundSpecCFI final : public MachineFunctionPass {
 char X86SoundSpecCFI::ID = 0;
 
 bool X86SoundSpecCFI::runOnMachineFunction(MachineFunction &MF) {
+  if (!soundspec::EnableSoundSpec)
+    return false;
+
   LLVM_DEBUG(dbgs() << getPassName() << "\n");
 
   const Function &F = MF.getFunction();
@@ -58,9 +63,20 @@ bool X86SoundSpecCFI::runOnMachineFunction(MachineFunction &MF) {
   auto *CI = cast<ConstantInt>(cast<ConstantAsMetadata>(MD)->getValue());
   uint32_t DestLabel = CI->getZExtValue();
   auto &MBB = MF.front();
-  BuildMI(MBB, MBB.begin(), DebugLoc(), TII->get(X86::SOUNDSPEC_CFI_DEST))
+  auto MBBI = MBB.begin();
+  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::SOUNDSPEC_CFI_DEST))
       .addImm(DestLabel);
-  return false;
+
+  // If this function is unsafe -or- it has a `self` argument, then mask in any
+  // branch.
+  auto UnsafeArg = [&F](const Argument &A) -> bool {
+    return F.hasParamAttribute(A.getArgNo(), Attribute::SoundSpecArgUnsafe);
+  };
+  if (!F.getMetadata(LLVMContext::MD_safe) || any_of(F.args(), UnsafeArg))
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::UNSAFE_POST));
+
+  // We unconditionally inserted SOUNDSPEC_CFI_DEST above, so MIR changed.
+  return true;
 }
 
 INITIALIZE_PASS(X86SoundSpecCFI, PASS_KEY, "X86 SoundSpec CFI", false, false)

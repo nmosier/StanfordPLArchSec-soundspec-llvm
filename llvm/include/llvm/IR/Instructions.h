@@ -3557,16 +3557,8 @@ public:
   SwitchInstProfUpdateWrapper(SwitchInst &SI) : SI(SI) { init(); }
 
   ~SwitchInstProfUpdateWrapper() {
-    if (!Changed || !Weights.has_value())
-      return;
-    if (Weights->size() >= 2) {
+    if (Changed && Weights.has_value() && Weights->size() >= 2)
       setBranchWeights(SI, Weights.value(), /*IsExpected=*/false);
-    } else {
-      // When the switch has been reduced to a single successor, branch
-      // weights are meaningless. Drop the stale !prof so a later wrapper
-      // construction doesn't see N old weights vs 1 successor.
-      SI.setMetadata(LLVMContext::MD_prof, nullptr);
-    }
   }
 
   /// Delegate the call to the underlying SwitchInst::removeCase() and remove

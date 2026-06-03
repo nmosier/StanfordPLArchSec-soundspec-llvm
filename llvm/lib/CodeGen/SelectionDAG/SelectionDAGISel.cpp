@@ -2588,14 +2588,6 @@ void SelectionDAGISel::Select_MEMBARRIER(SDNode *N) {
                        N->getOperand(0));
 }
 
-void SelectionDAGISel::Select_UNSAFE_SHADOW_EMBED(SDNode *N) {
-  // SoundSpec passthrough: tied `$val = $dst` (both share operand 0's
-  // type); `$tok` is an extra i32 register use kept alive but not tied.
-  CurDAG->SelectNodeTo(N, TargetOpcode::UNSAFE_SHADOW_EMBED,
-                       N->getValueType(0),
-                       {N->getOperand(0), N->getOperand(1)});
-}
-
 void SelectionDAGISel::Select_CONVERGENCECTRL_ANCHOR(SDNode *N) {
   CurDAG->SelectNodeTo(N, TargetOpcode::CONVERGENCECTRL_ANCHOR,
                        N->getValueType(0));

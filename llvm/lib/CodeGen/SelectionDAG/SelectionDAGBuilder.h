@@ -406,13 +406,14 @@ public:
                             MachineBasicBlock *FBB, MachineBasicBlock *CurBB,
                             MachineBasicBlock *SwitchBB,
                             Instruction::BinaryOps Opc, BranchProbability TProb,
-                            BranchProbability FProb, bool InvertCond);
+                            BranchProbability FProb, bool InvertCond,
+                            bool IsSafe = false);
   void EmitBranchForMergedCondition(const Value *Cond, MachineBasicBlock *TBB,
                                     MachineBasicBlock *FBB,
                                     MachineBasicBlock *CurBB,
                                     MachineBasicBlock *SwitchBB,
                                     BranchProbability TProb, BranchProbability FProb,
-                                    bool InvertCond);
+                                    bool InvertCond, bool IsSafe = false);
   bool ShouldEmitAsBranches(const std::vector<SwitchCG::CaseBlock> &Cases);
   bool isExportableFromCurrentBlock(const Value *V, const BasicBlock *FromBB);
   void CopyToExportRegsIfNeeded(const Value *V);

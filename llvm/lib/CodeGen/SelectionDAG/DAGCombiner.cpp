@@ -19836,9 +19836,10 @@ SDValue DAGCombiner::visitBRCOND(SDNode *N) {
   if (N1.getOpcode() == ISD::SETCC &&
       TLI.isOperationLegalOrCustom(ISD::BR_CC,
                                    N1.getOperand(0).getValueType())) {
+    // Merge BRCOND's flags (Safe, Unpredictable) with SETCC's (nsw, nuw, ...).
     return DAG.getNode(ISD::BR_CC, SDLoc(N), MVT::Other, Chain,
                        N1.getOperand(2), N1.getOperand(0), N1.getOperand(1), N2,
-                       N1->getFlags());
+                       N->getFlags() | N1->getFlags());
   }
 
   if (N1.hasOneUse()) {

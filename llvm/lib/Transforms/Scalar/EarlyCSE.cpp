@@ -489,9 +489,7 @@ struct CallValue {
 
   static bool canHandle(Instruction *Inst) {
     CallInst *CI = dyn_cast<CallInst>(Inst);
-    if (!CI ||
-        (!CI->onlyReadsMemory() && !CI->onlyWritesMemory() &&
-         !CI->hasFnAttr(Attribute::Idempotent)) ||
+    if (!CI || (!CI->onlyReadsMemory() && !CI->onlyWritesMemory()) ||
         // FIXME: Currently the calls which may access the thread id may
         // be considered as not accessing the memory. But this is
         // problematic for coroutines, since coroutines may resume in a
@@ -1626,17 +1624,12 @@ bool EarlyCSE::processNode(DomTreeNode *Node) {
     if (CallValue::canHandle(&Inst) &&
         (!MemInst.isValid() || !MemInst.isStore()) && !isa<MemSetInst>(&Inst)) {
       // If we have an available version of this call, and if it is the right
-      // generation, replace this instruction. Idempotent calls bypass the
-      // generation check entirely — by promise, repeating the call has no
-      // additional observable effect regardless of intervening operations.
+      // generation, replace this instruction.
       std::pair<Instruction *, unsigned> InVal = AvailableCalls.lookup(&Inst);
-      bool IsIdempotent =
-          cast<CallInst>(&Inst)->hasFnAttr(Attribute::Idempotent);
       if (InVal.first != nullptr &&
-          (IsIdempotent ||
-           (isSameMemGeneration(InVal.second, CurrentGeneration, InVal.first,
-                                &Inst) &&
-            InVal.first->mayReadFromMemory() == Inst.mayReadFromMemory()))) {
+          isSameMemGeneration(InVal.second, CurrentGeneration, InVal.first,
+                              &Inst) &&
+          InVal.first->mayReadFromMemory() == Inst.mayReadFromMemory()) {
         LLVM_DEBUG(dbgs() << "EarlyCSE CSE CALL: " << Inst
                           << "  to: " << *InVal.first << '\n');
         if (!DebugCounter::shouldExecute(CSECounter)) {
@@ -1644,7 +1637,6 @@ bool EarlyCSE::processNode(DomTreeNode *Node) {
           continue;
         }
         combineIRFlags(Inst, InVal.first);
-        combineMetadataForCSE(InVal.first, &Inst, /*DoesKMove=*/false);
         if (!Inst.use_empty())
           Inst.replaceAllUsesWith(InVal.first);
         salvageKnowledge(&Inst, &AC);

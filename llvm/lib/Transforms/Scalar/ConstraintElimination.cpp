@@ -34,6 +34,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/SoundSpec.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
@@ -52,11 +53,9 @@ using namespace PatternMatch;
 #define DEBUG_TYPE "constraint-elimination"
 
 STATISTIC(NumCondsRemoved, "Number of instructions removed");
-STATISTIC(NumSoundSpecConstraintElimBailed,
-          "[soundspec] constraint-elimination runs skipped because the "
-          "enclosing function lacks the `unsafe` attribute and the pass "
-          "would synthesize/replace speculation primitives outside any "
-          "tracked scope");
+STATISTIC(soundspecConstraintEdgeFactBails,
+          "[soundspec] Number of terminator-condition facts skipped due to "
+          "safe terminator");
 DEBUG_COUNTER(EliminatedCounter, "conds-eliminated",
               "Controls which conditions are eliminated");
 
@@ -1262,6 +1261,16 @@ void State::addInfoFor(BasicBlock &BB) {
     GuaranteedToExecute &= isGuaranteedToTransferExecutionToSuccessor(&I);
   }
 
+  // SoundSpec: a `!safe` terminator is a per-edge safety attestation, not a
+  // universal value fact. Skip pushing per-successor facts derived from its
+  // condition into the constraint system; downstream `addFact`/check
+  // resolution then can't use those facts to fold unsafe primitives.
+  if (soundspec::EnableSoundSpec &&
+      soundspec::isSafe(*BB.getTerminator())) {
+    ++soundspecConstraintEdgeFactBails;
+    return;
+  }
+
   if (auto *Switch = dyn_cast<SwitchInst>(BB.getTerminator())) {
     for (auto &Case : Switch->cases()) {
       BasicBlock *Succ = Case.getCaseSuccessor();
@@ -2120,17 +2129,6 @@ static bool eliminateConstraints(Function &F, DominatorTree &DT, LoopInfo &LI,
 
 PreservedAnalyses ConstraintEliminationPass::run(Function &F,
                                                  FunctionAnalysisManager &AM) {
-  // [soundspec] Constraint elimination replaces compares with constants
-  // and folds branches based on dominating-condition reasoning. The new
-  // edges and surviving instructions would need per-edge scope plumbing
-  // to be SoundSpec-correct. When the enclosing function is `unsafe`-attr
-  // the function attribute subsumes per-instruction scopes; otherwise,
-  // bail.
-  if (!F.hasFnAttribute(Attribute::Unsafe)) {
-    ++NumSoundSpecConstraintElimBailed;
-    return PreservedAnalyses::all();
-  }
-
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &LI = AM.getResult<LoopAnalysis>(F);
   auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);

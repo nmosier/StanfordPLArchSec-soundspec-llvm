@@ -141,7 +141,6 @@ add_llvm_component_library(LLVMAnalysis
   ScalarEvolutionAliasAnalysis.cpp
   ScalarEvolutionDivision.cpp
   ScalarEvolutionNormalization.cpp
-  SoundSpec/GenAnalysis.cpp
   StaticDataProfileInfo.cpp
   StackLifetime.cpp
   StackSafetyAnalysis.cpp
@@ -156,7 +155,6 @@ add_llvm_component_library(LLVMAnalysis
   TypeBasedAliasAnalysis.cpp
   TypeMetadataUtils.cpp
   UniformityAnalysis.cpp
-  UnsafeScopeAnalysis.cpp
   ScopedNoAliasAA.cpp
   ValueLattice.cpp
   ValueLatticeUtils.cpp

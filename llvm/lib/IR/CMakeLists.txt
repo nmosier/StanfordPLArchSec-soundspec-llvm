@@ -45,7 +45,6 @@ add_llvm_component_library(LLVMCore
   IntrinsicInst.cpp
   LLVMContext.cpp
   LLVMContextImpl.cpp
-  UnsafeScope.cpp
   LLVMRemarkStreamer.cpp
   LegacyPassManager.cpp
   MDBuilder.cpp
@@ -80,6 +79,7 @@ add_llvm_component_library(LLVMCore
   Verifier.cpp
   VFABIDemangler.cpp
   RuntimeLibcalls.cpp
+  SoundSpec.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/IR

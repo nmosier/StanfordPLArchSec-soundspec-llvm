@@ -297,8 +297,12 @@ static int readPrefixes(struct InternalInstruction *insn) {
     case 0x2e: // CS segment override -OR- Branch not taken
       insn->segmentOverride = SEG_OVERRIDE_CS;
       break;
-    case 0x36: // SS segment override -OR- Branch taken
-      insn->segmentOverride = SEG_OVERRIDE_SS;
+    case 0x36: // SS segment override -OR- SoundSpec UNSAFE prefix
+      // SoundSpec: 0x36 (legacy SS segment override) is repurposed as the
+      // UNSAFE prefix marking a speculation primitive that wasn't proven
+      // `safe`. Record it as the UNSAFE prefix rather than an SS segment
+      // override so the printer renders `unsafe` instead of `%ss:`/`ss`.
+      insn->hasUnsafePrefix = true;
       break;
     case 0x3e: // DS segment override
       insn->segmentOverride = SEG_OVERRIDE_DS;
@@ -1916,6 +1920,10 @@ MCDisassembler::DecodeStatus X86GenericDisassembler::getInstruction(
     unsigned Flags = X86::IP_NO_PREFIX;
     if (Insn.hasAdSize)
       Flags |= X86::IP_HAS_AD_SIZE;
+    // SoundSpec: recover the repurposed 0x36 UNSAFE prefix so the printer can
+    // render it as an `unsafe` prefix token.
+    if (Insn.hasUnsafePrefix)
+      Flags |= X86::IP_HAS_UNSAFE;
     if (!Insn.mandatoryPrefix) {
       if (Insn.hasOpSize)
         Flags |= X86::IP_HAS_OP_SIZE;

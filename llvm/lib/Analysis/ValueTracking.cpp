@@ -20,6 +20,7 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -65,6 +66,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/SoundSpec.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -89,6 +91,15 @@ using namespace llvm::PatternMatch;
 // dominating comparisons.
 static cl::opt<unsigned> DomConditionsMaxUses("dom-conditions-max-uses",
                                               cl::Hidden, cl::init(20));
+
+#define DEBUG_TYPE "value-tracking"
+
+STATISTIC(soundspecIsImpliedByDomConditionBails,
+          "[soundspec] Number of getDomPredecessorCondition lookups skipped "
+          "due to safe predecessor branch");
+STATISTIC(soundspecKnownBitsFromContextBails,
+          "[soundspec] Number of dominating branches skipped in "
+          "computeKnownBitsFromContext due to safe terminator");
 
 /// Maximum number of instructions to check between assume and context
 /// instruction.
@@ -1045,6 +1056,14 @@ void llvm::computeKnownBitsFromContext(const Value *V, KnownBits &Known,
   if (Q.DC && Q.DT) {
     // Handle dominating conditions.
     for (BranchInst *BI : Q.DC->conditionsFor(V)) {
+      // SoundSpec: a `!safe` branch's condition is a per-edge safety
+      // attestation, not a universal value fact. Don't let its truth
+      // refine the KnownBits of values that flow into unsafe primitives.
+      if (soundspec::EnableSoundSpec && soundspec::isSafe(*BI)) {
+        ++soundspecKnownBitsFromContextBails;
+        continue;
+      }
+
       BasicBlockEdge Edge0(BI->getParent(), BI->getSuccessor(0));
       if (Q.DT->dominates(Edge0, Q.CxtI->getParent()))
         computeKnownBitsFromCond(V, BI->getCondition(), Known, Q,
@@ -7174,17 +7193,6 @@ bool llvm::isSafeToSpeculativelyExecuteWithOpcode(
       return false;
     const Function *Callee = CI->getCalledFunction();
 
-    // [soundspec] Intrinsics that explicitly opt in via IntrSpeculatable
-    // are always safe to speculate, even if they are nominally
-    // side-effecting (e.g. write to inaccessible memory). The attribute
-    // is a hard contract from the intrinsic author that the call has no
-    // observable effect in a context where the source program would not
-    // have executed it. SoundSpec marker intrinsics (shadow.xmit etc.)
-    // rely on this so hoisters/sinkers/PRE will move them freely along
-    // with the transmitters they cover.
-    if (Callee && Callee->isIntrinsic() && Callee->isSpeculatable())
-      return true;
-
     // The called function could have undefined behavior or side-effects, even
     // if marked readnone nounwind.
     if (!Callee || !Callee->isSpeculatable())
@@ -9811,6 +9819,14 @@ getDomPredecessorCondition(const Instruction *ContextI) {
   // The branch should get simplified. Don't bother simplifying this condition.
   if (TrueBB == FalseBB)
     return {nullptr, false};
+
+  // SoundSpec: a `!safe` branch is a per-edge safety attestation, not a
+  // universal value fact. Refuse to imply downstream conditions from it.
+  if (soundspec::EnableSoundSpec &&
+      soundspec::isSafe(*PredBB->getTerminator())) {
+    ++soundspecIsImpliedByDomConditionBails;
+    return {nullptr, false};
+  }
 
   assert((TrueBB == ContextBB || FalseBB == ContextBB) &&
          "Predecessor block does not point to successor?");

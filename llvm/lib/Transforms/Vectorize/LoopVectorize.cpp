@@ -170,10 +170,6 @@ STATISTIC(LoopsVectorized, "Number of loops vectorized");
 STATISTIC(LoopsAnalyzed, "Number of loops analyzed for vectorization");
 STATISTIC(LoopsEpilogueVectorized, "Number of epilogues vectorized");
 STATISTIC(LoopsEarlyExitVectorized, "Number of early exit loops vectorized");
-STATISTIC(NumSoundSpecVectorizeBailed,
-          "[soundspec] loops not vectorized because the enclosing function "
-          "lacks the `unsafe` attribute and vectorization would synthesize "
-          "speculation primitives outside any tracked scope");
 
 static cl::opt<bool> EnableEpilogueVectorization(
     "enable-epilogue-vectorization", cl::init(true), cl::Hidden,
@@ -9709,21 +9705,6 @@ bool LoopVectorizePass::processLoop(Loop *L) {
 
   // Function containing loop
   Function *F = L->getHeader()->getParent();
-
-  // [soundspec] Vectorization synthesizes a scaffold of new speculation
-  // primitives (min.iters guard, scevcheck, memcheck, vector body latch,
-  // middle.block) and replaces N scalar loads/stores with vector ops that
-  // reorder memory accesses. Doing this correctly under SoundSpec would
-  // require non-trivial per-guard scope plumbing. When the enclosing
-  // function is `unsafe`-attr the function attribute already subsumes
-  // every per-instruction scope, so the scaffold is verifier-safe and
-  // semantically fine. Otherwise, bail.
-  if (!F->hasFnAttribute(Attribute::Unsafe)) {
-    ++NumSoundSpecVectorizeBailed;
-    LLVM_DEBUG(dbgs() << "LV: SoundSpec — caller is not `unsafe`-attr, "
-                         "skipping vectorization.\n");
-    return false;
-  }
 
   // Looking at the diagnostic output is the only way to determine if a loop
   // was vectorized (other than looking at the IR or machine code), so it

@@ -215,12 +215,6 @@ def IntrConvergent : IntrinsicProperty;
 // This property indicates that the intrinsic is safe to speculate.
 def IntrSpeculatable : IntrinsicProperty;
 
-// IntrIdempotent - Calls to this intrinsic are idempotent: calling it N
-// times with identical arguments is equivalent to calling it once, even in
-// the presence of intervening operations. Parallels the idempotent
-// attribute on LLVM IR functions.
-def IntrIdempotent : IntrinsicProperty;
-
 // This property can be used to override the 'has no other side effects'
 // language of the IntrNoMem, IntrReadMem, IntrWriteMem, and IntrArgMemOnly
 // intrinsic properties.  By default, intrinsics are assumed to have side
@@ -1577,115 +1571,6 @@ def int_annotation : DefaultAttrsIntrinsic<
 // and is modelled as having side effects.
 def int_codeview_annotation : DefaultAttrsIntrinsic<[], [llvm_metadata_ty],
                                         [IntrInaccessibleMemOnly, IntrNoDuplicate]>;
-
-//===---------------------- SoundSpec Unsafe Region Intrinsics ------------===//
-//
-// `void @llvm.unsafe.begin(i32)` / `i32 @llvm.unsafe.end()` mark the begin
-// and end of an unsafe scope (end's result is an opaque token). These are
-// mid-level markers — SoundSpecCleanup's `convertIntoSoundSpecPushPop`
-// rewrites them into `int_soundspec_push_unsafe` / `int_soundspec_pop`
-// before codegen.
-//
-// Modeled as `read any memory, write only inaccessible memory`:
-// `IntrWrite<[InaccessibleMem]>` keeps writes restricted to compiler-
-// invisible scope-stack state (so they survive DCE without polluting
-// program-visible memory), while leaving the default unknown-read effect
-// in place so the optimizer cannot speculate, CSE, or reorder ordinary
-// loads across them. NOT speculatable, NOT idempotent (begin/end twice
-// differs from once).
-def int_unsafe_begin : DefaultAttrsIntrinsic<[], [llvm_i32_ty],
-    [IntrWrite<[InaccessibleMem]>]>;
-def int_unsafe_end   : DefaultAttrsIntrinsic<[llvm_i32_ty], [],
-    [IntrWrite<[InaccessibleMem]>]>;
-
-// SoundSpec scope-stack ops. All four share the same memory matrix as the
-// begin/end pair above — read arbitrary memory, read/write only inaccessible
-// memory — via `IntrWrite<[InaccessibleMem]>`. Sufficient to keep them from
-// being DCE'd, CSE'd, hoisted, sunk, or reordered with ordinary loads/stores
-// in either direction. NOT speculatable, NOT idempotent.
-//
-//   `i32 llvm.soundspec.push.unsafe(i32 %dep)` — push an unsafe frame.
-//   `i32 llvm.soundspec.push.safe(i32 %dep)`   — push a safe frame.
-//   `i32 llvm.soundspec.pop(i32 %dep)`         — pop the top frame.
-//   `void llvm.soundspec.join()`               — join frames (no token).
-def int_soundspec_push_unsafe : DefaultAttrsIntrinsic<[llvm_i32_ty],
-    [llvm_i32_ty], [IntrWrite<[InaccessibleMem]>]>;
-def int_soundspec_push_safe   : DefaultAttrsIntrinsic<[llvm_i32_ty],
-    [llvm_i32_ty], [IntrWrite<[InaccessibleMem]>]>;
-def int_soundspec_pop         : DefaultAttrsIntrinsic<[llvm_i32_ty],
-    [llvm_i32_ty], [IntrWrite<[InaccessibleMem]>]>;
-def int_soundspec_join        : DefaultAttrsIntrinsic<[], [],
-    [IntrWrite<[InaccessibleMem]>]>;
-
-// SoundSpec shadow-token intrinsics. Used to give producers without a
-// natural data input (e.g. `alloca !unsafe`) something for
-// `llvm.unsafe.shadow.dep` to thread through.
-//
-// `i32 llvm.unsafe.shadow.gen(metadata %scope)` materializes a fresh
-// shadow token tagged with a distinct scope-identity MDNode. The MDNode
-// is typically a self-referencing distinct node (`!x = distinct !{!x}`)
-// so its identity is its pointer; cloning a function gives each clone
-// its own scope. `IntrInaccessibleMemOnly` + `IntrSpeculatable` +
-// `IntrIdempotent`: the call's effect is monotonic and keyed solely on
-// the scope MDNode, so two gens with the same MDNode are CSE-equivalent
-// and can be hoisted / duplicated freely.
-def int_unsafe_shadow_gen : DefaultAttrsIntrinsic<
-    [llvm_i32_ty],
-    [llvm_metadata_ty],
-    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
-
-// `i32 llvm.unsafe.shadow.dep(i32 %x, i32 %y)` combines two shadow
-// tokens into a single token. Pure (CSE-equivalent for equal operand
-// pairs) and `Commutative` so CSE treats `dep(a,b)` and `dep(b,a)`
-// as equal.
-def int_unsafe_shadow_dep : PureIntrinsic<
-    [llvm_i32_ty],
-    [llvm_i32_ty, llvm_i32_ty],
-    [Commutative]>;
-
-// `i32 llvm.unsafe.shadow.arg.<T>(<T> %arg)` produces an i32 shadow
-// token derived from an arbitrary-typed input value. Pure: no memory,
-// freely speculatable, deterministic — two `shadow.arg` calls with
-// equal (and same-typed) arguments are CSE-equivalent.
-def int_unsafe_shadow_arg : PureIntrinsic<
-    [llvm_i32_ty],
-    [llvm_any_ty],
-    []>;
-
-// `<T> llvm.unsafe.shadow.embed.<T>(<T> %value, i32 %tok)` is a
-// passthrough that embeds a shadow token alongside an arbitrary-typed
-// value — it returns `%value` unchanged at runtime, but the call
-// preserves the dataflow link from `%tok` to consumers of the result
-// for SoundSpec analysis. Pure (CSE/DCE-eligible). When `%tok` is a
-// `Constant` (e.g., the result of `shadow.gen` on a constant scope
-// id that's folded to an immediate), `simplifyBinaryIntrinsic` folds
-// the call to `%value` directly.
-def int_unsafe_shadow_embed : PureIntrinsic<
-    [llvm_any_ty],
-    [LLVMMatchType<0>, llvm_i32_ty],
-    []>;
-
-// `void llvm.unsafe.shadow.xmit(i32 %x)` is the side-effecting sink
-// that keeps shadow-token computations alive against DCE.
-// `IntrInaccessibleMemOnly` + `IntrSpeculatable` + `IntrIdempotent`:
-// the effect is a monotonic latched bit keyed on the operand, so two
-// xmits with the same token are CSE-equivalent and can be hoisted /
-// duplicated freely.
-def int_unsafe_shadow_xmit : DefaultAttrsIntrinsic<
-    [],
-    [llvm_i32_ty],
-    [IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
-
-// `void llvm.unsafe.shadow.tie(i32 %gentok, i32 %deptok)` ties a
-// shadow gen token to a dep token. `IntrWriteMem` +
-// `IntrInaccessibleMemOnly` + `IntrSpeculatable` + `IntrIdempotent`:
-// write-only effect on inaccessible memory; monotonic latched-bit set
-// keyed on the operand pair, so two ties with identical operands are
-// CSE-equivalent and can be hoisted / duplicated freely.
-def int_unsafe_shadow_tie : DefaultAttrsIntrinsic<
-    [],
-    [llvm_i32_ty, llvm_i32_ty],
-    [IntrWriteMem, IntrInaccessibleMemOnly, IntrSpeculatable, IntrIdempotent]>;
 
 //===------------------------ Trampoline Intrinsics -----------------------===//
 //

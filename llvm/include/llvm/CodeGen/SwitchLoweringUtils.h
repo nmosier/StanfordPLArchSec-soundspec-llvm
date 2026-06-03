@@ -140,6 +140,10 @@ struct CaseBlock {
   // Branch weights and predictability.
   BranchProbability TrueProb, FalseProb;
   bool IsUnpredictable;
+  // SoundSpec: IR-level `!safe` tag on the originating branch / switch.
+  // Rides through to the emitted SDNode via SDNodeFlags::Safe and onward
+  // to the MI's MIFlag::Safe.
+  bool IsSafe;
 
   // Constructor for SelectionDAG.
   CaseBlock(ISD::CondCode cc, const Value *cmplhs, const Value *cmprhs,
@@ -147,11 +151,11 @@ struct CaseBlock {
             MachineBasicBlock *falsebb, MachineBasicBlock *me, SDLoc dl,
             BranchProbability trueprob = BranchProbability::getUnknown(),
             BranchProbability falseprob = BranchProbability::getUnknown(),
-            bool isunpredictable = false)
+            bool isunpredictable = false, bool issafe = false)
       : CC(cc), CmpLHS(cmplhs), CmpMHS(cmpmiddle), CmpRHS(cmprhs),
         TrueBB(truebb), FalseBB(falsebb), ThisBB(me), DL(dl),
         TrueProb(trueprob), FalseProb(falseprob),
-        IsUnpredictable(isunpredictable) {}
+        IsUnpredictable(isunpredictable), IsSafe(issafe) {}
 
   // Constructor for GISel.
   CaseBlock(CmpInst::Predicate pred, bool nocmp, const Value *cmplhs,
@@ -160,11 +164,11 @@ struct CaseBlock {
             MachineBasicBlock *me, DebugLoc dl,
             BranchProbability trueprob = BranchProbability::getUnknown(),
             BranchProbability falseprob = BranchProbability::getUnknown(),
-            bool isunpredictable = false)
+            bool isunpredictable = false, bool issafe = false)
       : PredInfo({pred, nocmp}), CmpLHS(cmplhs), CmpMHS(cmpmiddle),
         CmpRHS(cmprhs), TrueBB(truebb), FalseBB(falsebb), ThisBB(me),
         DbgLoc(dl), TrueProb(trueprob), FalseProb(falseprob),
-        IsUnpredictable(isunpredictable) {}
+        IsUnpredictable(isunpredictable), IsSafe(issafe) {}
 };
 
 struct JumpTable {
@@ -181,6 +185,9 @@ struct JumpTable {
 
   /// The debug location of the instruction this JumpTable was produced from.
   std::optional<SDLoc> SL; // For SelectionDAG
+
+  /// SoundSpec: `!safe` flag inherited from the originating SwitchInst.
+  bool IsSafe = false;
 
   JumpTable(Register R, unsigned J, MachineBasicBlock *M, MachineBasicBlock *D,
             std::optional<SDLoc> SL)
@@ -228,6 +235,8 @@ struct BitTestBlock {
   BranchProbability Prob;
   BranchProbability DefaultProb;
   bool FallthroughUnreachable = false;
+  /// SoundSpec: `!safe` flag inherited from the originating SwitchInst.
+  bool IsSafe = false;
 
   BitTestBlock(APInt F, APInt R, const Value *SV, Register Rg, MVT RgVT, bool E,
                bool CR, MachineBasicBlock *P, MachineBasicBlock *D,
@@ -252,6 +261,8 @@ struct SwitchWorkListItem {
   const ConstantInt *GE = nullptr;
   const ConstantInt *LT = nullptr;
   BranchProbability DefaultProb;
+  /// SoundSpec: `!safe` flag inherited from the originating SwitchInst.
+  bool IsSafe = false;
 };
 using SwitchWorkList = SmallVector<SwitchWorkListItem, 4>;
 

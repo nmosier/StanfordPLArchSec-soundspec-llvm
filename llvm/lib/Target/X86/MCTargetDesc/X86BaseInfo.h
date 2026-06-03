@@ -64,6 +64,9 @@ enum IPREFIXES {
   IP_USE_EVEX = 1U << 11,
   IP_USE_DISP8 = 1U << 12,
   IP_USE_DISP32 = 1U << 13,
+  // SoundSpec: emit a 0x36 (legacy SS, repurposed as UNSAFE) prefix before
+  // any speculation primitive whose source MI lacked `MIFlag::Safe`.
+  IP_HAS_UNSAFE = 1U << 14,
 };
 
 enum OperandType : unsigned {

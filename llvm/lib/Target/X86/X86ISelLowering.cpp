@@ -52,6 +52,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/SoundSpec.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
@@ -69,9 +70,6 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "x86-isel"
-
-STATISTIC(NumSoundSpecCmpArithAtomicBails,
-          "Number of cmp-arith atomicrmw expansions skipped under SoundSpec");
 
 static cl::opt<int> ExperimentalPrefInnermostLoopAlignment(
     "x86-experimental-pref-innermost-loop-alignment", cl::init(4),
@@ -32258,16 +32256,6 @@ void X86TargetLowering::emitBitTestAtomicRMWIntrinsic(AtomicRMWInst *AI) const {
 
 static bool shouldExpandCmpArithRMWInIR(AtomicRMWInst *AI) {
   using namespace llvm::PatternMatch;
-  // SoundSpec: this expansion replaces the atomicrmw + icmp pair with a
-  // call to an `llvm.x86.atomic.*.cc` intrinsic — which the SoundSpec
-  // verifier treats as a relevant call requiring !safe / !unsafe
-  // metadata. The source atomicrmw isn't itself a transmitter (per
-  // `unsafe::isRelevantCall`), so it carries no SoundSpec context we can
-  // soundly propagate. Bail and let the regular X86 backend lower the
-  // atomicrmw directly via `lock`-prefixed instructions.
-  ++NumSoundSpecCmpArithAtomicBails;
-  return false;
-
   if (!AI->hasOneUse())
     return false;
 
@@ -63036,13 +63024,17 @@ X86TargetLowering::EmitKCFICheck(MachineBasicBlock &MBB,
   assert(MBBI->isCall() && MBBI->getCFIType() &&
          "Invalid call instruction for a KCFI check");
 
-  // [soundspec] We replace KCFI's implementation to instead use
-  // our new instructions, in this case SOUNDSPEC_CFI_SRC.
-  return BuildMI(MBB, MBBI, MIMetadata(*MBBI), TII->get(X86::SOUNDSPEC_CFI_SRC))
-      .addImm(MBBI->getCFIType())
-      .getInstr();
-
-  // ====== OLD LLVM IMPLEMENTATION (FOR REFERENCE) ==== //
+  // [soundspec] Replace KCFI's cmp+ud2 check with a SOUNDSPEC_CFI_SRC
+  // marker (encoded as `0F 1E 80 <imm32>`). The hardware compares the
+  // label to the landing-pad SOUNDSPEC_CFI_DEST at the call target — no
+  // target-register tracking or memory-operand unfolding needed, since
+  // the marker is a pure label and the call itself is unchanged.
+  if (soundspec::EnableSoundSpec) {
+    return BuildMI(MBB, MBBI, MIMetadata(*MBBI),
+                   TII->get(X86::SOUNDSPEC_CFI_SRC))
+        .addImm(MBBI->getCFIType())
+        .getInstr();
+  }
 
   MachineFunction &MF = *MBB.getParent();
   // If the call target is a memory operand, unfold it and use R11 for the

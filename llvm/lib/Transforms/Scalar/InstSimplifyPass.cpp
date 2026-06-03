@@ -14,7 +14,6 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/UnsafeScope.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Scalar.h"
@@ -25,9 +24,6 @@ using namespace llvm;
 #define DEBUG_TYPE "instsimplify"
 
 STATISTIC(NumSimplified, "Number of redundant instructions removed");
-STATISTIC(NumSoundSpecBlocked,
-          "[soundspec] simplifications blocked because the tagged "
-          "instruction folded to a non-instruction (constant/arg/etc.)");
 
 static bool runImpl(Function &F, const SimplifyQuery &SQ) {
   SmallPtrSet<const Instruction *, 8> S1, S2, *ToSimplify = &S1, *Next = &S2;
@@ -54,23 +50,6 @@ static bool runImpl(Function &F, const SimplifyQuery &SQ) {
           Changed = true;
         } else if (!I.use_empty()) {
           if (Value *V = simplifyInstruction(&I, SQ)) {
-            // [soundspec] If `I` carries `!unsafe`, the scope must survive
-            // the rewrite somewhere. We use Option 1: union I's scope
-            // into V's, but only when V is an Instruction (the only kind
-            // that can carry metadata). If V is a Constant / Argument /
-            // GlobalValue, there's nothing to tag, so block the fold for
-            // now and count it so we can audit how often it happens.
-            // (Tackle the non-instruction case alongside constant-prop.)
-            if (MDNode *IMD = I.getMetadata(LLVMContext::MD_unsafe)) {
-              auto *VI = dyn_cast<Instruction>(V);
-              if (!VI) {
-                ++NumSoundSpecBlocked;
-                continue;
-              }
-              MDNode *Merged = unsafe::mergeMetadata(
-                  IMD, VI->getMetadata(LLVMContext::MD_unsafe));
-              VI->setMetadata(LLVMContext::MD_unsafe, Merged);
-            }
             // Mark all uses for resimplification next time round the loop.
             for (User *U : I.users())
               Next->insert(cast<Instruction>(U));

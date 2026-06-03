@@ -12,6 +12,7 @@
 
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
@@ -724,6 +725,23 @@ void MachineBasicBlock::updateTerminator(
   // A block with no successors has no concerns with fall-through edges.
   if (this->succ_empty())
     return;
+
+  // Capture MIFlags from the existing conditional branch(es) so the
+  // removeBranch/insertBranch rebuild below doesn't drop bits like
+  // `MIFlag::Safe` (SoundSpec) or `MIFlag::Unpredictable`. Unconditional
+  // branches are excluded because the rebuild may add fresh fallthrough
+  // jumps that didn't exist before.
+  uint32_t PreservedCondBrFlags = 0;
+  for (const MachineInstr &MI : terminators())
+    if (MI.isConditionalBranch())
+      PreservedCondBrFlags |= MI.getFlags();
+  auto ReapplyOnExit = llvm::scope_exit([this, PreservedCondBrFlags] {
+    if (!PreservedCondBrFlags)
+      return;
+    for (MachineInstr &MI : terminators())
+      if (MI.isConditionalBranch())
+        MI.setFlags(MI.getFlags() | PreservedCondBrFlags);
+  });
 
   MachineBasicBlock *TBB = nullptr, *FBB = nullptr;
   SmallVector<MachineOperand, 4> Cond;

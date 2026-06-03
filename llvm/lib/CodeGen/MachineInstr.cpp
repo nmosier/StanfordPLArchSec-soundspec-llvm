@@ -1887,6 +1887,8 @@ void MachineInstr::print(raw_ostream &OS, ModuleSlotTracker &MST,
     OS << "samesign ";
   if (getFlag(MachineInstr::InBounds))
     OS << "inbounds ";
+  if (getFlag(MachineInstr::Safe))
+    OS << "safe ";
 
   // Print the opcode name.
   if (TII)

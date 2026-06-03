@@ -988,24 +988,12 @@ static Value *canonicalizeSaturatedSubtract(const ICmpInst *ICI,
   if (!match(FalseVal, m_Zero()))
     return nullptr;
 
-  // [soundspec] The synthesized usub.sat intrinsic is a CallBase: the
-  // verifier requires every call to carry `!safe`/`!unsafe`. The pattern
-  // we matched was purely arithmetic (icmp + add + select), none of
-  // which are speculation primitives or transmitters, so no upstream
-  // scope tag exists to propagate. Tag the new call `!safe !{}`.
-  auto tagSafe = [](Value *V) {
-    if (auto *I = dyn_cast<Instruction>(V))
-      I->setMetadata(LLVMContext::MD_safe,
-                     MDNode::get(I->getContext(), {}));
-    return V;
-  };
-
   // ugt 0 is canonicalized to ne 0 and requires special handling
   // (a != 0) ? a + -1 : 0 -> usub.sat(a, 1)
   if (Pred == ICmpInst::ICMP_NE) {
     if (match(B, m_Zero()) && match(TrueVal, m_Add(m_Specific(A), m_AllOnes())))
-      return tagSafe(Builder.CreateBinaryIntrinsic(
-          Intrinsic::usub_sat, A, ConstantInt::get(A->getType(), 1)));
+      return Builder.CreateBinaryIntrinsic(Intrinsic::usub_sat, A,
+                                           ConstantInt::get(A->getType(), 1));
     return nullptr;
   }
 
@@ -1043,8 +1031,7 @@ static Value *canonicalizeSaturatedSubtract(const ICmpInst *ICI,
 
   // (a > b) ? a - b : 0 -> usub.sat(a, b)
   // (a > b) ? b - a : 0 -> -usub.sat(a, b)
-  Value *Result =
-      tagSafe(Builder.CreateBinaryIntrinsic(Intrinsic::usub_sat, A, B));
+  Value *Result = Builder.CreateBinaryIntrinsic(Intrinsic::usub_sat, A, B);
   if (IsNegative)
     Result = Builder.CreateNeg(Result);
   return Result;

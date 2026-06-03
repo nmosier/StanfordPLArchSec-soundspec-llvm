@@ -1395,21 +1395,6 @@ def ARITH_FENCE : StandardPseudoInstruction {
   let isMeta = true;
 }
 
-// SoundSpec shadow-token meta pseudo. UNSAFE_SHADOW_EMBED ties `$dst` to the
-// first input register so register allocation reuses the same physical
-// register and no spurious code is left behind once it's stripped.
-// `isMeta = true` means AsmPrinter emits no bytes for it.
-// Polymorphic passthrough: $val (any type) gets returned as $dst (same
-// type). $tok is the i32 shadow token kept as an extra use. The
-// `$val = $dst` tie is safe because both share the same type.
-def UNSAFE_SHADOW_EMBED : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
-  let InOperandList = (ins unknown:$val, unknown:$tok);
-  let AsmString = "";
-  let hasSideEffects = false;
-  let Constraints = "$val = $dst";
-  let isMeta = true;
-}
 def STACKMAP : StandardPseudoInstruction {
   let OutOperandList = (outs);
   let InOperandList = (ins i64imm:$id, i32imm:$nbytes, variable_ops);

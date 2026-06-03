@@ -904,6 +904,11 @@ PrefixKind X86MCCodeEmitter::emitPrefixImpl(unsigned &CurOp, const MCInst &MI,
 
   // Emit the repeat opcode prefix as needed.
   unsigned Flags = MI.getFlags();
+  // SoundSpec: emit the UNSAFE prefix (0x36 — legacy SS, repurposed) before
+  // every other prefix on a speculation primitive lacking `!safe`. Placed at
+  // the head of the prefix stream so a SoundSpec-aware decoder sees it first.
+  if (Flags & X86::IP_HAS_UNSAFE)
+    emitByte(0x36, CB);
   if (TSFlags & X86II::REP || Flags & X86::IP_HAS_REPEAT)
     emitByte(0xF3, CB);
   if (Flags & X86::IP_HAS_REPEAT_NE)

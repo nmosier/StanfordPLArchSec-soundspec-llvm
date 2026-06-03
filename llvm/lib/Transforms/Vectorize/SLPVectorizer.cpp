@@ -67,7 +67,6 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Type.h"
-#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -113,20 +112,6 @@ using namespace std::placeholders;
 #define DEBUG_TYPE "SLP"
 
 STATISTIC(NumVectorInstructions, "Number of vector instructions generated");
-STATISTIC(NumSoundSpecSLPBundleBailed,
-          "[soundspec] SLP load/store bundles abandoned because the "
-          "scalars carry a mix of `!safe` and `!unsafe` scope tags");
-STATISTIC(NumSoundSpecSLPXmitBailed,
-          "[soundspec] SLP load/store bundles abandoned because a scalar "
-          "carries `!soundspec.xmit` (collapsing distinct transmitters into "
-          "one vector op would require synthesizing a merged transmitter ID)");
-
-// [soundspec] Forward declarations; definitions live next to the SLP-local
-// propagateMetadata helper.
-static bool bundleHasSoundSpecMix(ArrayRef<Value *> VL);
-static bool bundleHasSoundSpecXmit(ArrayRef<Value *> VL);
-static void propagateSoundSpecScope(Instruction *NewInst,
-                                    ArrayRef<Value *> VL);
 
 DEBUG_COUNTER(VectorizedGraphs, "slp-vectorized",
               "Controls which SLP graphs should be vectorized.");
@@ -10458,22 +10443,6 @@ BoUpSLP::TreeEntry::EntryState BoUpSLP::getScalarsVectorizationState(
     return TreeEntry::Vectorize;
   }
   case Instruction::Load: {
-    // [soundspec] Bundles with mixed `!safe` + `!unsafe` scalars can't be
-    // collapsed into one vector op (no single scope tag for the result).
-    // `unsafe`-attr functions have no per-instruction tags, so this is
-    // vacuously not-mixed for them.
-    if (!F->hasFnAttribute(Attribute::Unsafe) &&
-        bundleHasSoundSpecMix(VL)) {
-      ++NumSoundSpecSLPBundleBailed;
-      return TreeEntry::NeedToGather;
-    }
-    // [soundspec] Bundles whose scalars carry `!soundspec.xmit` can't be
-    // collapsed without synthesizing a merged transmitter ID for the result.
-    if (!F->hasFnAttribute(Attribute::Unsafe) &&
-        bundleHasSoundSpecXmit(VL)) {
-      ++NumSoundSpecSLPXmitBailed;
-      return TreeEntry::NeedToGather;
-    }
     // Check that a vectorized load would load the same memory as a scalar
     // load. For example, we don't want to vectorize loads that are smaller
     // than 8-bit. Even though we have a packed struct {<i2, i2, i2, i2>} LLVM
@@ -10656,18 +10625,6 @@ BoUpSLP::TreeEntry::EntryState BoUpSLP::getScalarsVectorizationState(
     return TreeEntry::Vectorize;
   }
   case Instruction::Store: {
-    // [soundspec] Same mixed-tag bail as for loads.
-    if (!F->hasFnAttribute(Attribute::Unsafe) &&
-        bundleHasSoundSpecMix(VL)) {
-      ++NumSoundSpecSLPBundleBailed;
-      return TreeEntry::NeedToGather;
-    }
-    // [soundspec] Same `!soundspec.xmit` bail as for loads.
-    if (!F->hasFnAttribute(Attribute::Unsafe) &&
-        bundleHasSoundSpecXmit(VL)) {
-      ++NumSoundSpecSLPXmitBailed;
-      return TreeEntry::NeedToGather;
-    }
     // Check if the stores are consecutive or if we need to swizzle them.
     llvm::Type *ScalarTy = cast<StoreInst>(VL0)->getValueOperand()->getType();
     // Avoid types that are padded when being allocated as scalars, while
@@ -19822,66 +19779,6 @@ static Instruction *propagateMetadata(Instruction *Inst, ArrayRef<Value *> VL) {
   return llvm::propagateMetadata(Inst, Insts);
 }
 
-// [soundspec] Returns true if the scalars in \p VL carry a mix of `!safe`
-// and `!unsafe` scope tags. Such bundles can't be safely vectorized into a
-// single op because the resulting vector op needs a uniform scope tag and
-// there's no defensible way to coerce a `!safe` source into an `!unsafe`
-// set (or vice versa).
-static bool bundleHasSoundSpecMix(ArrayRef<Value *> VL) {
-  bool AnyUnsafe = false;
-  bool AnySafe = false;
-  for (Value *V : VL) {
-    auto *I = dyn_cast<Instruction>(V);
-    if (!I)
-      continue;
-    if (I->getMetadata(LLVMContext::MD_unsafe))
-      AnyUnsafe = true;
-    if (I->getMetadata(LLVMContext::MD_safe))
-      AnySafe = true;
-  }
-  return AnyUnsafe && AnySafe;
-}
-
-// [soundspec] Returns true if any scalar in \p VL is a transmitter carrying
-// `!soundspec.xmit`. Vectorizing such a bundle would fold several distinct
-// transmitters into a single vector op, which would then need a synthesized
-// merged transmitter ID to satisfy the verifier. Rather than fabricate one we
-// abandon the bundle.
-static bool bundleHasSoundSpecXmit(ArrayRef<Value *> VL) {
-  for (Value *V : VL) {
-    auto *I = dyn_cast<Instruction>(V);
-    if (!I)
-      continue;
-    if (I->getMetadata(LLVMContext::MD_soundspec_xmit))
-      return true;
-  }
-  return false;
-}
-
-// [soundspec] After the bundle has been determined to be uniformly tagged
-// (no `!safe` + `!unsafe` mix), tag the synthesized vector op with the
-// union of the bundle's scope tags. If sources are `!unsafe` → union into
-// `!unsafe`; if `!safe` → union into `!safe`. Vacuously a no-op for
-// `unsafe`-attr functions (their scalars carry no per-instruction tags).
-static void propagateSoundSpecScope(Instruction *NewInst,
-                                    ArrayRef<Value *> VL) {
-  MDNode *MergedUnsafe = nullptr;
-  MDNode *MergedSafe = nullptr;
-  for (Value *V : VL) {
-    auto *I = dyn_cast<Instruction>(V);
-    if (!I)
-      continue;
-    if (MDNode *U = I->getMetadata(LLVMContext::MD_unsafe))
-      MergedUnsafe = unsafe::mergeMetadata(MergedUnsafe, U);
-    if (MDNode *S = I->getMetadata(LLVMContext::MD_safe))
-      MergedSafe = unsafe::mergeMetadata(MergedSafe, S);
-  }
-  if (MergedUnsafe)
-    NewInst->setMetadata(LLVMContext::MD_unsafe, MergedUnsafe);
-  else if (MergedSafe)
-    NewInst->setMetadata(LLVMContext::MD_safe, MergedSafe);
-}
-
 static DebugLoc getDebugLocFromPHI(PHINode &PN) {
   if (DebugLoc DL = PN.getDebugLoc())
     return DL;
@@ -20566,7 +20463,6 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
           NewLI = Builder.CreateAlignedLoad(LoadVecTy, PO, CommonAlignment);
         }
         NewLI = ::propagateMetadata(NewLI, E->Scalars);
-        propagateSoundSpecScope(NewLI, E->Scalars);
         // TODO: include this cost into CommonCost.
         if (auto *VecTy = dyn_cast<FixedVectorType>(LI->getType())) {
           assert(SLPReVec && "FixedVectorType is not expected.");
@@ -20644,7 +20540,6 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       Value *V = E->State == TreeEntry::CompressVectorize
                      ? NewLI
                      : ::propagateMetadata(NewLI, E->Scalars);
-      propagateSoundSpecScope(NewLI, E->Scalars);
 
       if (StridedLoadTy != VecTy)
         V = Builder.CreateBitOrPointerCast(V, VecTy);
@@ -20692,7 +20587,6 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
 
       Value *V = ::propagateMetadata(ST, E->Scalars);
-      propagateSoundSpecScope(ST, E->Scalars);
 
       E->VectorizedValue = V;
       ++NumVectorInstructions;

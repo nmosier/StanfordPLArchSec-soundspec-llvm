@@ -408,6 +408,11 @@ void X86InstPrinterCommon::printInstFlags(const MCInst *MI, raw_ostream &O,
   else if (Flags & X86::IP_HAS_REPEAT)
     O << "\trep\t";
 
+  // SoundSpec: the 0x36 prefix (legacy SS, repurposed) marks a speculation
+  // primitive that wasn't proven `safe`. Render it as an `unsafe` prefix.
+  if (Flags & X86::IP_HAS_UNSAFE)
+    O << "\tunsafe\t";
+
   if (TSFlags & X86II::EVEX_NF && !X86::isCFCMOVCC(MI->getOpcode()))
     O << "\t{nf}";
 

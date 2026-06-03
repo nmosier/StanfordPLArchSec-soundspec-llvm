@@ -256,11 +256,6 @@ public:
                               llvm::MDNode::get(getContext(), {}));
   }
 
-  /// Set unsafe scope metadata.
-  void SetUnsafeMetadata(MDNode *MD) {
-    AddOrRemoveMetadataToCopy(llvm::LLVMContext::MD_unsafe, MD);
-  }
-
   /// Collect metadata with IDs \p MetadataKinds from \p Src which should be
   /// added to all created instructions. Entries present in MedataDataToCopy but
   /// not on \p Src will be dropped from MetadataToCopy.

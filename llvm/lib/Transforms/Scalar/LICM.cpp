@@ -70,7 +70,6 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/PredIteratorCache.h"
@@ -116,11 +115,6 @@ STATISTIC(NumIntAssociationsHoisted,
           "reassociated and hoisted out of the loop");
 STATISTIC(NumBOAssociationsHoisted, "Number of invariant BinaryOp expressions "
                                     "reassociated and hoisted out of the loop");
-
-STATISTIC(NumSoundSpecPreheaderLoadBailed,
-          "[soundspec] scalar promotions bailed because hoisting an "
-          "!unsafe load into the preheader would change its speculation "
-          "profile");
 
 /// Memory promotion is enabled by default.
 static cl::opt<bool>
@@ -1826,23 +1820,6 @@ public:
         NewSI->setOrdering(AtomicOrdering::Unordered);
       NewSI->setAlignment(Alignment);
       NewSI->setDebugLoc(DL);
-      // [soundspec] The sunk exit-block store stands in for every in-loop
-      // store being promoted. Union their SoundSpec scope tags onto the
-      // new store; if any in-loop store was `!unsafe`, the merged store
-      // becomes `!unsafe`-union; else `!safe !{}`.
-      {
-        MDNode *MergedUnsafe = nullptr;
-        for (const Instruction *U : Uses)
-          if (isa<StoreInst>(U))
-            MergedUnsafe = unsafe::mergeMetadata(
-                MergedUnsafe, U->getMetadata(LLVMContext::MD_unsafe));
-        if (MergedUnsafe && MergedUnsafe->getNumOperands() > 0) {
-          NewSI->setMetadata(LLVMContext::MD_unsafe, MergedUnsafe);
-        } else {
-          NewSI->setMetadata(LLVMContext::MD_safe,
-                             MDNode::get(NewSI->getContext(), {}));
-        }
-      }
       // Attach DIAssignID metadata to the new store, generating it on the
       // first loop iteration.
       if (i == 0) {
@@ -2200,24 +2177,6 @@ bool llvm::promoteLoopAccessesToScalars(
     LoopUsesLocs.push_back(U->getDebugLoc());
   auto DL = DebugLoc::getMergedLocations(LoopUsesLocs);
 
-  // [soundspec] Decide whether we'd materialize a brand-new preheader load
-  // for this promotion. If we would, and any operation being promoted
-  // carries `!unsafe`, bail. Hoisting a tagged transmitter out of the
-  // loop changes its speculation profile (it now runs unconditionally
-  // every entry instead of per-iteration under whatever condition the
-  // original load was under). The exit-store sink half of promotion is
-  // still fine and stays enabled.
-  bool WouldCreatePreheaderLoad =
-      FoundLoadToPromote || !StoreIsGuanteedToExecute;
-  if (WouldCreatePreheaderLoad) {
-    for (Instruction *Use : LoopUses) {
-      if (Use->getMetadata(LLVMContext::MD_unsafe)) {
-        ++NumSoundSpecPreheaderLoadBailed;
-        return false;
-      }
-    }
-  }
-
   // We use the SSAUpdater interface to insert phi nodes as required.
   SmallVector<PHINode *, 16> NewPHIs;
   SSAUpdater SSA(&NewPHIs);
@@ -2230,7 +2189,7 @@ bool llvm::promoteLoopAccessesToScalars(
   // Set up the preheader to have a definition of the value.  It is the live-out
   // value from the preheader that uses in the loop will use.
   LoadInst *PreheaderLoad = nullptr;
-  if (WouldCreatePreheaderLoad) {
+  if (FoundLoadToPromote || !StoreIsGuanteedToExecute) {
     PreheaderLoad =
         new LoadInst(AccessTy, SomePtr, SomePtr->getName() + ".promoted",
                      Preheader->getTerminator()->getIterator());
@@ -2240,12 +2199,6 @@ bool llvm::promoteLoopAccessesToScalars(
     PreheaderLoad->setDebugLoc(DebugLoc::getDropped());
     if (AATags && LoadIsGuaranteedToExecute)
       PreheaderLoad->setAAMetadata(AATags);
-
-    // [soundspec] We bailed above if any LoopUse carried !unsafe, so by
-    // construction the synthesized preheader load belongs to no unsafe
-    // scope. Tag it `!safe !{}` to satisfy the verifier's transmitter rule.
-    PreheaderLoad->setMetadata(LLVMContext::MD_safe,
-                               MDNode::get(PreheaderLoad->getContext(), {}));
 
     MemoryAccess *PreheaderLoadMemoryAccess = MSSAU.createMemoryAccessInBB(
         PreheaderLoad, nullptr, PreheaderLoad->getParent(), MemorySSA::End);

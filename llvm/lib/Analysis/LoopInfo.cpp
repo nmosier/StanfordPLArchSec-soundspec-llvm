@@ -113,14 +113,7 @@ bool Loop::makeLoopInvariant(Instruction *I, bool &Changed,
   // condition. Any metadata defined on it can be control dependent on this
   // condition. Conservatively strip it here so that we don't give any wrong
   // information to the optimizer.
-  //
-  // SoundSpec scope/xmit tags are instruction-static (a transmitter is a
-  // transmitter regardless of which block it lands in), so they're safe to
-  // preserve across the hoist — and the SoundSpec verifier requires them.
-  I->dropUnknownNonDebugMetadata({LLVMContext::MD_safe,
-                                  LLVMContext::MD_unsafe,
-                                  LLVMContext::MD_unsafe_xmit,
-                                  LLVMContext::MD_soundspec_xmit});
+  I->dropUnknownNonDebugMetadata();
 
   if (SE)
     SE->forgetBlockAndLoopDispositions(I);

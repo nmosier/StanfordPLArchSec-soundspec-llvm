@@ -129,12 +129,6 @@ HANDLE_TARGET_OPCODE(BUNDLE)
 HANDLE_TARGET_OPCODE(LIFETIME_START)
 HANDLE_TARGET_OPCODE(LIFETIME_END)
 
-/// SoundSpec shadow-token meta pseudo. UNSAFE_SHADOW_EMBED is a pure
-/// passthrough with `$dst` tied to the first input (so register allocation
-/// reuses that register). `isMeta = true` and stripped at AsmPrinter — it
-/// emits no code.
-HANDLE_TARGET_OPCODE(UNSAFE_SHADOW_EMBED)
-
 /// Pseudo probe
 HANDLE_TARGET_OPCODE(PSEUDO_PROBE)
 

@@ -40,6 +40,8 @@
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/SoundSpec.h"
 #include <optional>
 using namespace llvm;
 using namespace PatternMatch;
@@ -63,6 +65,8 @@ static cl::opt<bool> PerPredRanges(
     "lvi-per-pred-ranges", cl::Hidden, cl::init(false),
     cl::desc("Enable tracking of ranges for a value in a block for"
              "each block predecessor (default = false)"));
+
+STATISTIC(SoundSpecEdgeValueLocalBails, "[soundspec] Number of edge-local values hidden due to safe terminator");
 
 namespace llvm {
 FunctionPass *createLazyValueInfoPass() {
@@ -1580,6 +1584,15 @@ static ValueLatticeElement constantFoldUser(User *Usr, Value *Op,
 std::optional<ValueLatticeElement>
 LazyValueInfoImpl::getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
                                      BasicBlock *BBTo, bool UseBlockValue) {
+  // [soundspec] If the terminator is safe, bail.
+  // FIXME: This can be optimized in the future: techically, it can be used to elide
+  // other safe branches. But, that would require a deeper analysis of users
+  // of elided expressions. Don't worry about that for now.
+  if (soundspec::EnableSoundSpec && soundspec::isSafe(*BBFrom->getTerminator())) {
+    ++SoundSpecEdgeValueLocalBails;
+    return ValueLatticeElement::getOverdefined();
+  }
+  
   // TODO: Handle more complex conditionals. If (v == 0 || v2 < 1) is false, we
   // know that v != 0.
   if (BranchInst *BI = dyn_cast<BranchInst>(BBFrom->getTerminator())) {

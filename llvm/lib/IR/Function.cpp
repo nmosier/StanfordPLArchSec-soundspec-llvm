@@ -603,7 +603,7 @@ void Function::stealArgumentListFrom(Function &Src) {
   Src.setValueSubclassData(Src.getSubclassDataFromValue() | (1 << 0));
 }
 
-void Function::deleteBodyImpl(bool ShouldDrop) {        
+void Function::deleteBodyImpl(bool ShouldDrop) {
   setIsMaterializable(false);
 
   for (BasicBlock &BB : *this)

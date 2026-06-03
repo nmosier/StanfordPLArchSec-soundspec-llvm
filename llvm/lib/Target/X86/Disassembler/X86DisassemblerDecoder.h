@@ -700,6 +700,10 @@ struct InternalInstruction {
   uint8_t rexPrefix;
   // The segment override type
   SegmentOverride segmentOverride;
+  // SoundSpec: the 0x36 byte (legacy SS segment override) repurposed as the
+  // UNSAFE prefix was present. Recorded separately from segmentOverride so the
+  // printer renders it as an `unsafe` prefix rather than an `%ss:` override.
+  bool hasUnsafePrefix;
   // 1 if the prefix byte, 0xf2 or 0xf3 is xacquire or xrelease
   bool xAcquireRelease;
 

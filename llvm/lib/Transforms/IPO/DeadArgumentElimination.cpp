@@ -33,7 +33,6 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
 #include "llvm/IR/PassManager.h"
@@ -208,12 +207,7 @@ bool DeadArgumentEliminationPass::deleteDeadVarargs(Function &F) {
     }
     NewCB->setCallingConv(CB->getCallingConv());
     NewCB->setAttributes(PAL);
-    NewCB->copyMetadata(*CB, {LLVMContext::MD_prof, LLVMContext::MD_dbg,
-                              LLVMContext::MD_safe,
-                              LLVMContext::MD_unsafe,
-                              LLVMContext::MD_unsafe_init,
-                              LLVMContext::MD_unsafe_xmit,
-                              LLVMContext::MD_unsafe_spec});
+    NewCB->copyMetadata(*CB, {LLVMContext::MD_prof, LLVMContext::MD_dbg});
 
     Args.clear();
 
@@ -963,12 +957,7 @@ bool DeadArgumentEliminationPass::removeDeadStuffFromFunction(Function *F) {
     }
     NewCB->setCallingConv(CB.getCallingConv());
     NewCB->setAttributes(NewCallPAL);
-    NewCB->copyMetadata(CB, {LLVMContext::MD_prof, LLVMContext::MD_dbg,
-                             LLVMContext::MD_safe,
-                             LLVMContext::MD_unsafe,
-                             LLVMContext::MD_unsafe_init,
-                             LLVMContext::MD_unsafe_xmit,
-                             LLVMContext::MD_unsafe_spec});
+    NewCB->copyMetadata(CB, {LLVMContext::MD_prof, LLVMContext::MD_dbg});
     Args.clear();
     ArgAttrVec.clear();
 

@@ -220,6 +220,7 @@ static MIToken::TokenKind getIdentifierKind(StringRef Identifier) {
       .Case("inbounds", MIToken::kw_inbounds)
       .Case("nofpexcept", MIToken::kw_nofpexcept)
       .Case("unpredictable", MIToken::kw_unpredictable)
+      .Case("safe", MIToken::kw_safe)
       .Case("debug-location", MIToken::kw_debug_location)
       .Case("debug-instr-number", MIToken::kw_debug_instr_number)
       .Case("dbg-instr-ref", MIToken::kw_dbg_instr_ref)

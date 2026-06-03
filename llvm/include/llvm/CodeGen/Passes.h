@@ -514,10 +514,6 @@ createGlobalMergePass(const TargetMachine *TM, unsigned MaximalOffset,
 /// protect against stack-based overflow vulnerabilities.
 LLVM_ABI FunctionPass *createSafeStackPass();
 
-/// This pass lowers SoundSpec `!unsafe`/`!safe` metadata and shadow
-/// intrinsics into the hardware-shaped IR consumed by the backend.
-LLVM_ABI FunctionPass *createSoundSpecCleanupLegacyPass();
-
 /// This pass detects subregister lanes in a virtual register that are used
 /// independently of other lanes and splits them into separate virtual
 /// registers.

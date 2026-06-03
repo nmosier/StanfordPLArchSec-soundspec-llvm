@@ -54,7 +54,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -106,7 +105,6 @@
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
-#include "llvm/IR/UnsafeScope.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/VFABIDemangler.h"
@@ -119,14 +117,10 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/IR/InstIterator.h"
-#include "llvm/IR/PatternMatch.h"
-#include "llvm/ADT/PostOrderIterator.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -134,8 +128,6 @@
 #include <optional>
 #include <string>
 #include <utility>
-#include <unordered_set>
-#include <queue>
 
 using namespace llvm;
 
@@ -143,9 +135,6 @@ static cl::opt<bool> VerifyNoAliasScopeDomination(
     "verify-noalias-scope-decl-dom", cl::Hidden, cl::init(false),
     cl::desc("Ensure that llvm.experimental.noalias.scope.decl for identical "
              "scopes are not dominating"));
-
-static cl::opt<bool> SoundSpecVerify(
-    "soundspec-verify", cl::Hidden, cl::init(true));
 
 struct llvm::VerifierSupport {
   raw_ostream *OS;
@@ -674,10 +663,6 @@ private:
 
   /// Verify the llvm.experimental.noalias.scope.decl declarations
   void verifyNoAliasScopeDecl();
-
-  void verifyUnsafeScope(const Function &F, Metadata *ID);
-  void verifyUnsafeScopes(const Function &F);
-  void verifyUnsafeFunction(const Function &F);
 };
 
 } // end anonymous namespace
@@ -3048,9 +3033,6 @@ void Verifier::verifySiblingFuncletUnwinds() {
 //
 void Verifier::visitFunction(const Function &F) {
   visitGlobalValue(F);
-
-  // [soundspec] Verify placement of llvm.unsafe.{enter,exit} intrinsics.
-  verifyUnsafeScopes(F);
 
   // Check function arguments.
   FunctionType *FT = F.getFunctionType();
@@ -7760,195 +7742,6 @@ void Verifier::verifyNoAliasScopeDecl() {
                   I);
     ItCurrent = ItNext;
   }
-}
-
-void Verifier::verifyUnsafeFunction(const Function &F) {
-  assert(F.hasFnAttribute(Attribute::Unsafe));
-
-  for (const Instruction &I : llvm::instructions(F)) {
-    // No !unsafe metadata is allowed, period.
-    Check(!I.getMetadata(LLVMContext::MD_unsafe),
-          "Instruction in unsafe function has !unsafe metadata", &I);
-
-    Check(!I.getMetadata(LLVMContext::MD_unsafe_init),
-          "Instruction in unsafe function has !unsafe.init metadata", &I);
-
-    if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
-      switch (II->getIntrinsicID()) {
-        case Intrinsic::unsafe_shadow_arg: 
-        case Intrinsic::unsafe_shadow_dep:
-        case Intrinsic::unsafe_shadow_gen:
-        case Intrinsic::unsafe_shadow_embed:
-        case Intrinsic::unsafe_shadow_xmit:
-          Check(false,
-                "Found llvm.unsafe.shadow.* intrinsic in unsafe-attr function",
-                II);
-          break;
-        default:
-          break;
-      }
-    }
-  }
-}
-
-
-void Verifier::verifyUnsafeScope(const Function &F, Metadata *ID) {
-}
-
-void Verifier::verifyUnsafeScopes(const Function &F) {
-  using namespace llvm::PatternMatch;
-
-  bool Final = F.getMetadata("soundspec.final") != nullptr;
-
-  if (!Final) {
-    for (auto &I : instructions(F)) {
-      Check(!match(&I, m_Intrinsic<Intrinsic::unsafe_begin>()),
-            "Found @llvm.unsafe.begin() in non-final function!", &I);
-      Check(!match(&I, m_Intrinsic<Intrinsic::unsafe_end>()),
-            "Found @llvm.unsafe.end() in non-final function!", &I);
-    }
-  }
-
-  // Make sure !unsafe metadata has the right shape.
-  // We verify this even if !soundspec.verify isn't present.
-  for (auto &I : instructions(F)) {
-    auto *IDs = I.getMetadata(LLVMContext::MD_unsafe);
-    if (!IDs)
-      continue;
-    for (Metadata *ID : IDs->operands())
-      Check(unsafe::isValidScope(ID),
-            "bad unsafe scope metadata node in list", &I, ID);
-  }
-
-  if (!SoundSpecVerify || !F.getMetadata("soundspec.verify")) {
-    // Shouldn't have any intrinsics.
-    for (auto &I : instructions(F)) {
-      if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
-        switch (II->getIntrinsicID()) {
-        case Intrinsic::unsafe_shadow_gen:
-          case Intrinsic::unsafe_shadow_dep:
-          case Intrinsic::unsafe_shadow_arg:
-          case Intrinsic::unsafe_shadow_embed:
-            Check(false,
-                  "Found shadow intrinsic in early-stage soundspec function",
-                  &I);
-            break;
-        }
-      }
-    }
-    return;
-  }
-
-  if (F.hasFnAttribute(Attribute::Unsafe)) {
-    verifyUnsafeFunction(F);
-    return;
-  }
-
-  // Collect reachable blocks. We'll only verify those.
-  SmallSet<const BasicBlock *, 8> ReachableBlocks;
-  ReachableBlocks.reserve(F.size());
-  {
-    SmallVector<const BasicBlock *> Todo;
-    Todo.push_back(&F.getEntryBlock());
-    while (!Todo.empty()) {
-      auto *B = Todo.pop_back_val();
-      if (ReachableBlocks.insert(B).second)
-        for (auto *Succ : successors(B))
-          Todo.push_back(Succ);
-    }
-  }
-
-  // Collect !unsafe IDs.
-  SmallSet<Metadata *, 4> IDSet;
-  for (auto *B : ReachableBlocks)
-    for (auto &I : *B)
-      if (auto *IDs = I.getMetadata(LLVMContext::MD_unsafe))
-        copy(IDs->operands(), std::inserter(IDSet, IDSet.end()));
-
-  // Make sure that we don't have any bare transmitters,
-  // speculation primitives, or calls.
-  if (!Final) {
-    for (auto *B : ReachableBlocks) {
-      for (auto &I : *B) {
-        auto *UnsafeMD = I.getMetadata(LLVMContext::MD_unsafe);
-        auto *SafeMD = I.getMetadata(LLVMContext::MD_safe);
-        auto *II = dyn_cast<IntrinsicInst>(&I);
-
-        if (isSpeculationPrimitive(I)) {
-          Check(UnsafeMD || SafeMD,
-                "speculation primitive missing !safe/!unsafe metadata!", &I);
-        }
-
-        if (isTransmitter(I) || unsafe::isRelevantCall(I)) {
-          Check(UnsafeMD || SafeMD,
-                "transmitter/call missing !safe/!unsafe metadata!", &I);
-        }
-
-        // Make sure there is no empty !unsafe.
-        if (UnsafeMD) {
-          Check(UnsafeMD->getNumOperands(), "!unsafe shouldn't be empty", &I);
-        }
-
-        // @llvm.unsafe.shadow.dep shouldn't have !unsafe/!safe metadata.
-        if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_dep) {
-          Check(!UnsafeMD && !SafeMD,
-                "@llvm.unsafe.shadow.dep shouldn't have !safe/!unsafe metadata",
-                &I);
-        }
-
-        // @llvm.unsafe.shadow.gen's metadata arg should match its !unsafe
-        // scope.
-        if (II && II->getIntrinsicID() == Intrinsic::unsafe_shadow_gen) {
-          Check(UnsafeMD,
-                "@llvm.unsafe.shadow.gen should have !unsafe metadata", &I);
-          auto *MV = cast<MetadataAsValue>(II->getArgOperand(0));
-          Check(MV->getMetadata() == UnsafeMD->getOperand(0),
-                "@llvm.unsafe.shadow.gen's metadata arg should match its "
-                "!unsafe metadata",
-                II, UnsafeMD);
-        }
-      }
-    }
-  }
-
-  // !soundspec.xmit checking.
-  //
-  // Each `@llvm.unsafe.shadow.xmit()` carries a tuple of xmit IDs as
-  // its `!soundspec.xmit` metadata — the set of transmitters it
-  // covers. After CSE may merge multiple xmits, this tuple is the
-  // union (concat) of the originals' operand sets.
-  //
-  // Each `!safe` transmitter carries a `!soundspec.xmit` whose
-  // operand set is the set of IDs the transmitter links to. For an
-  // unmerged transmitter, that operand set is `{self}` (the
-  // self-referencing distinct MDNode itself); for CSE-merged
-  // transmitters the operand set is the concat of the originals'.
-  // Verifier requirement: every operand of the transmitter's MD must
-  // appear as an operand in some xmit's tuple.
-  if (!Final) {
-    SmallSet<Metadata *, 8> CoveredIDs;
-    for (auto *B : ReachableBlocks)
-      for (auto &I : *B)
-        if (match(&I, m_Intrinsic<Intrinsic::unsafe_shadow_xmit>()))
-          if (auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit))
-            for (auto &Op : MD->operands())
-              CoveredIDs.insert(Op.get());
-    for (auto *B : ReachableBlocks) {
-      for (auto &I : *B) {
-        if (isTransmitter(I) && I.getMetadata(LLVMContext::MD_safe)) {
-          auto *MD = I.getMetadata(LLVMContext::MD_soundspec_xmit);
-          Check(MD, "!safe transmitters should have !soundspec.xmit", &I);
-          for (auto &Op : MD->operands())
-            Check(CoveredIDs.contains(Op.get()),
-                  "no @llvm.unsafe.shadow.xmit() covers transmitter ID", &I);
-        }
-      }
-    }
-  }
-
-  // Verify each unsafe scope individually.
-  for (auto *ID : IDSet)
-    verifyUnsafeScope(F, ID);
 }
 
 //===----------------------------------------------------------------------===//

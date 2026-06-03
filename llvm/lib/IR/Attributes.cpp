@@ -278,10 +278,6 @@ Attribute Attribute::getWithUWTableKind(LLVMContext &Context,
   return get(Context, UWTable, uint64_t(Kind));
 }
 
-Attribute Attribute::getWithSoundSpecCfi(LLVMContext &Context, uint32_t Label) {
-  return get(Context, SoundSpecCfi, uint64_t(Label));
-}
-
 Attribute Attribute::getWithMemoryEffects(LLVMContext &Context,
                                           MemoryEffects ME) {
   return get(Context, Memory, ME.toIntValue());
@@ -487,12 +483,6 @@ UWTableKind Attribute::getUWTableKind() const {
   return UWTableKind(pImpl->getValueAsInt());
 }
 
-uint32_t Attribute::getSoundSpecCfi() const {
-  assert(hasAttribute(Attribute::SoundSpecCfi) &&
-         "Trying to get soundspec_cfi label from non-soundspec_cfi attribute");
-  return static_cast<uint32_t>(pImpl->getValueAsInt());
-}
-
 AllocFnKind Attribute::getAllocKind() const {
   assert(hasAttribute(Attribute::AllocKind) &&
          "Trying to get allockind value from non-allockind attribute");
@@ -607,10 +597,6 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     UWTableKind Kind = getUWTableKind();
     assert(Kind != UWTableKind::None && "uwtable attribute should not be none");
     return Kind == UWTableKind::Default ? "uwtable" : "uwtable(sync)";
-  }
-
-  if (hasAttribute(Attribute::SoundSpecCfi)) {
-    return ("soundspec_cfi(" + Twine(getValueAsInt()) + ")").str();
   }
 
   if (hasAttribute(Attribute::AllocKind)) {
@@ -2249,10 +2235,6 @@ AttrBuilder &AttrBuilder::addVScaleRangeAttrFromRawRepr(uint64_t RawArgs) {
     return *this;
 
   return addRawIntAttr(Attribute::VScaleRange, RawArgs);
-}
-
-AttrBuilder &AttrBuilder::addSoundSpecCfiAttr(uint32_t Label) {
-  return addRawIntAttr(Attribute::SoundSpecCfi, uint64_t(Label));
 }
 
 AttrBuilder &AttrBuilder::addUWTableAttr(UWTableKind Kind) {

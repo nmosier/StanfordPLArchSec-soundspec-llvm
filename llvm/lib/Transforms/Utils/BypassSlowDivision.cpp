@@ -18,7 +18,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -38,9 +37,6 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "bypass-slow-division"
-
-STATISTIC(NumSoundSpecBails,
-          "Number of BypassSlowDivision invocations skipped under SoundSpec");
 
 namespace {
 
@@ -448,17 +444,36 @@ std::optional<QuotRemPair> FastDivInsertionTask::insertFastDivAndRem() {
 
 /// This optimization identifies DIV/REM instructions in a BB that can be
 /// profitably bypassed and carried out with a shorter, faster divide.
-///
-/// SoundSpec: this pass synthesizes new conditional branches (speculation
-/// primitives) whose !safe/!unsafe metadata we cannot soundly determine
-/// from local context — defaulting them to !safe would mask real
-/// speculative side channels through `DIV`, and defaulting to !unsafe
-/// over-fences. Until a proper provenance pass exists, bail
-/// unconditionally and count it for telemetry. The internal helpers
-/// (`FastDivInsertionTask`, etc.) above are preserved as-is to make the
-/// re-enable trivial when we revisit this.
-bool llvm::bypassSlowDivision(BasicBlock *,
-                              const BypassWidthsTy &) {
-  ++NumSoundSpecBails;
-  return false;
+bool llvm::bypassSlowDivision(BasicBlock *BB,
+                              const BypassWidthsTy &BypassWidths) {
+  DivCacheTy PerBBDivCache;
+
+  bool MadeChange = false;
+  Instruction *Next = &*BB->begin();
+  while (Next != nullptr) {
+    // We may add instructions immediately after I, but we want to skip over
+    // them.
+    Instruction *I = Next;
+    Next = Next->getNextNode();
+
+    // Ignore dead code to save time and avoid bugs.
+    if (I->use_empty())
+      continue;
+
+    FastDivInsertionTask Task(I, BypassWidths);
+    if (Value *Replacement = Task.getReplacement(PerBBDivCache)) {
+      I->replaceAllUsesWith(Replacement);
+      I->eraseFromParent();
+      MadeChange = true;
+    }
+  }
+
+  // Above we eagerly create divs and rems, as pairs, so that we can efficiently
+  // create divrem machine instructions.  Now erase any unused divs / rems so we
+  // don't leave extra instructions sitting around.
+  for (auto &KV : PerBBDivCache)
+    for (Value *V : {KV.second.Quotient, KV.second.Remainder})
+      RecursivelyDeleteTriviallyDeadInstructions(V);
+
+  return MadeChange;
 }
