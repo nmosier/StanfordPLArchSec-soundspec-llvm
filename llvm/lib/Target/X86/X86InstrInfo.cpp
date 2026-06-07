@@ -8618,6 +8618,16 @@ bool X86InstrInfo::unfoldMemoryOperand(
 
   // Emit the data processing instruction.
   MachineInstr *DataMI = MF.CreateMachineInstr(MCID, MI.getDebugLoc(), true);
+  // SoundSpec: the unfolded data MI inherits the original's role as the
+  // speculation primitive (e.g. CALL64m -> MOV64rm + CALL64r — the CALL is
+  // the primitive). Transfer MIFlag::Safe and the kcfi-derived cfi-type so
+  // MachineLICM and other callers don't silently strip them during unfold.
+  // Without the cfi-type carry, the later KCFI pass sees cfi-type=0 on the
+  // unfolded call and emits no SOUNDSPEC_CFI_SRC marker.
+  if (MI.getFlag(MachineInstr::Safe))
+    DataMI->setFlag(MachineInstr::Safe);
+  if (uint32_t CFIType = MI.getCFIType())
+    DataMI->setCFIType(MF, CFIType);
   MachineInstrBuilder MIB(MF, DataMI);
 
   if (FoldedStore)

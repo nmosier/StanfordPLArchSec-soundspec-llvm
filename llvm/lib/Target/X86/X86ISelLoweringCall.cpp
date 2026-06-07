@@ -2079,7 +2079,12 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   bool HasNCSR = (CB && isa<CallInst>(CB) &&
                   CB->hasFnAttr("no_caller_saved_registers"));
   bool IsIndirectCall = (CB && isa<CallInst>(CB) && CB->isIndirectCall());
-  bool IsCFICall = IsIndirectCall && CLI.CFIType;
+  // SoundSpec: also treat direct calls as CFI-bearing when we have a
+  // CFIType — IR-level direct calls can lower to machine-level CALL64m
+  // through a GOT slot, and the marker rides on the SDNode's CFIType
+  // through to the MI. EmitKCFICheck filters out the pcrel direct forms
+  // there, so this gate just needs to let the CFIType through.
+  bool IsCFICall = (IsIndirectCall || soundspec::EnableSoundSpec) && CLI.CFIType;
   const Module *M = MF.getFunction().getParent();
 
   // If the indirect call target has the nocf_check attribute, the call needs

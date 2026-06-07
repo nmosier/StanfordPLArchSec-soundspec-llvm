@@ -325,6 +325,63 @@ let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in {
                     Sched<[]>;
 }
 
+// SoundSpec TAINT — encoded as `0F 19 /1 <reg>` (TB-prefixed opcode 0x19,
+// ModR/M with mod=11/reg=001/rm=<reg>). Same `0F 19` reserved no-op space
+// as UNSAFE_POST, different /reg subop. Identity at runtime; semantically
+// marks the operand register as a SoundSpec taint source. The `$src = $dst`
+// tie reflects the single-register encoding — the instruction reads and
+// writes the same architectural register.
+//
+// No `hasSideEffects` — these are pure data-dependent markers, not memory
+// ops. Lets MachineCSE merge duplicate TAINTs of the same input, the
+// scheduler reorder freely, MachineLICM hoist loop-invariant TAINTs, and
+// load-folding work for the un-TAINTed majority of values. If a TAINT's
+// output is never consumed, DCE may remove it — that's fine since with no
+// consumer there's no leak to protect.
+//
+// TAINT128r is the XMM-class variant — encoded `0F 1C /2 <xmm>` (TB-prefixed
+// opcode 0x1C, ModR/M with mod=11/reg=010/rm=<xmm>). Same TB no-op space as
+// the GPR forms but a different sub-opcode, since 128-bit XMM ops need their
+// own decoder slot. TAINT256r / TAINT512r reserved for later.
+//
+// Selection of which TAINT to emit is driven by the operand's register
+// class — TAINT32r/TAINT64r for GR32/GR64, TAINT128r for VR128 (incl.
+// FR32/FR64 — they share the underlying XMM register file). No td-side
+// matching pattern: the dispatcher is target C++ (either an MI-pass after
+// RegAlloc, or the IR pre-pass for shape rewrites).
+let mayLoad = 0, mayStore = 0,
+    Constraints = "$src = $dst" in {
+  def TAINT32r : I<0x19, MRM1r, (outs GR32:$dst), (ins GR32:$src),
+                   "taint{l}\t$src",
+                   [(set GR32:$dst, (int_soundspec_taint GR32:$src))]>, TB,
+                   Sched<[]>;
+  def TAINT64r : RI<0x19, MRM1r, (outs GR64:$dst), (ins GR64:$src),
+                    "taint{q}\t$src",
+                    [(set GR64:$dst, (int_soundspec_taint GR64:$src))]>, TB,
+                    Sched<[]>;
+  def TAINT128r : I<0x1C, MRM2r, (outs VR128:$dst), (ins VR128:$src),
+                    "taint128\t$src", []>, TB, Sched<[]>;
+}
+
+// Patterns matching `llvm.soundspec.taint` of any 128-bit-vector MVT to
+// TAINT128r. The instruction is opcode-/encoding-identical for all of
+// these — the lane element type doesn't matter at the machine level since
+// the taint operates on the whole 128-bit register.
+let Predicates = [HasSSE2] in {
+  def : Pat<(v16i8 (int_soundspec_taint (v16i8 VR128:$src))),
+            (TAINT128r VR128:$src)>;
+  def : Pat<(v8i16 (int_soundspec_taint (v8i16 VR128:$src))),
+            (TAINT128r VR128:$src)>;
+  def : Pat<(v4i32 (int_soundspec_taint (v4i32 VR128:$src))),
+            (TAINT128r VR128:$src)>;
+  def : Pat<(v2i64 (int_soundspec_taint (v2i64 VR128:$src))),
+            (TAINT128r VR128:$src)>;
+  def : Pat<(v4f32 (int_soundspec_taint (v4f32 VR128:$src))),
+            (TAINT128r VR128:$src)>;
+  def : Pat<(v2f64 (int_soundspec_taint (v2f64 VR128:$src))),
+            (TAINT128r VR128:$src)>;
+}
+
 //===----------------------------------------------------------------------===//
 // Pseudo instructions used by address sanitizer.
 //===----------------------------------------------------------------------===//

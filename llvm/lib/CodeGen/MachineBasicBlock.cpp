@@ -12,7 +12,6 @@
 
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
@@ -726,23 +725,6 @@ void MachineBasicBlock::updateTerminator(
   if (this->succ_empty())
     return;
 
-  // Capture MIFlags from the existing conditional branch(es) so the
-  // removeBranch/insertBranch rebuild below doesn't drop bits like
-  // `MIFlag::Safe` (SoundSpec) or `MIFlag::Unpredictable`. Unconditional
-  // branches are excluded because the rebuild may add fresh fallthrough
-  // jumps that didn't exist before.
-  uint32_t PreservedCondBrFlags = 0;
-  for (const MachineInstr &MI : terminators())
-    if (MI.isConditionalBranch())
-      PreservedCondBrFlags |= MI.getFlags();
-  auto ReapplyOnExit = llvm::scope_exit([this, PreservedCondBrFlags] {
-    if (!PreservedCondBrFlags)
-      return;
-    for (MachineInstr &MI : terminators())
-      if (MI.isConditionalBranch())
-        MI.setFlags(MI.getFlags() | PreservedCondBrFlags);
-  });
-
   MachineBasicBlock *TBB = nullptr, *FBB = nullptr;
   SmallVector<MachineOperand, 4> Cond;
   DebugLoc DL = findBranchDebugLoc();
@@ -782,11 +764,9 @@ void MachineBasicBlock::updateTerminator(
     if (isLayoutSuccessor(TBB)) {
       if (TII->reverseBranchCondition(Cond))
         return;
-      TII->removeBranch(*this);
-      TII->insertBranch(*this, FBB, nullptr, Cond, DL);
+      TII->replaceBranch(*this, FBB, nullptr, Cond, DL);
     } else if (isLayoutSuccessor(FBB)) {
-      TII->removeBranch(*this);
-      TII->insertBranch(*this, TBB, nullptr, Cond, DL);
+      TII->replaceBranch(*this, TBB, nullptr, Cond, DL);
     }
     return;
   }
@@ -816,11 +796,9 @@ void MachineBasicBlock::updateTerminator(
       TII->insertBranch(*this, PreviousLayoutSuccessor, nullptr, Cond, DL);
       return;
     }
-    TII->removeBranch(*this);
-    TII->insertBranch(*this, PreviousLayoutSuccessor, nullptr, Cond, DL);
+    TII->replaceBranch(*this, PreviousLayoutSuccessor, nullptr, Cond, DL);
   } else if (!isLayoutSuccessor(PreviousLayoutSuccessor)) {
-    TII->removeBranch(*this);
-    TII->insertBranch(*this, TBB, PreviousLayoutSuccessor, Cond, DL);
+    TII->replaceBranch(*this, TBB, PreviousLayoutSuccessor, Cond, DL);
   }
 }
 

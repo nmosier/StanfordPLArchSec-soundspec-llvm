@@ -794,6 +794,24 @@ public:
                         BytesAdded);
   }
 
+  /// Atomic `removeBranch` + `insertBranch` for branch-reshaping passes.
+  /// Captures the OR of MIFlags on \p MBB's existing conditional branch(es),
+  /// performs the remove+insert, then ORs those flags onto the new
+  /// conditional branch(es). Use this any time a pass reverses, retargets,
+  /// or otherwise rebuilds a block's terminators — bare
+  /// `removeBranch`/`insertBranch` will silently drop bits like
+  /// `MIFlag::Safe` and `MIFlag::Unpredictable` because the old MI is gone
+  /// and the new one is built fresh.
+  ///
+  /// Unconditional branches are intentionally excluded from preservation:
+  /// when a pass inserts a fresh fall-through `JMP`, it represents a new
+  /// edge, not a continuation of any prior speculation primitive.
+  unsigned replaceBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
+                         MachineBasicBlock *FBB,
+                         ArrayRef<MachineOperand> Cond, const DebugLoc &DL,
+                         int *BytesRemoved = nullptr,
+                         int *BytesAdded = nullptr) const;
+
   /// Object returned by analyzeLoopForPipelining. Allows software pipelining
   /// implementations to query attributes of the loop being pipelined and to
   /// apply target-specific updates to the loop once pipelining is complete.

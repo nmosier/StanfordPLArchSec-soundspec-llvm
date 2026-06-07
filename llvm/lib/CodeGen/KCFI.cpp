@@ -22,6 +22,7 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
+#include "llvm/Support/Debug.h"
 
 using namespace llvm;
 
@@ -71,12 +72,17 @@ bool KCFI::emitCheck(MachineBasicBlock &MBB,
     report_fatal_error("Cannot emit a KCFI check for a bundled call");
 
   // Emit a KCFI check for the call instruction at MBBI. The implementation
-  // must unfold memory operands if applicable.
+  // must unfold memory operands if applicable. Targets may return nullptr to
+  // skip insertion entirely (e.g. SoundSpec: no marker on direct pcrel calls
+  // since they aren't machine-level indirect).
   MachineInstr *Check = TLI->EmitKCFICheck(MBB, MBBI, TII);
 
   // Clear the original call's CFI type.
   assert(MBBI->isCall() && "Unexpected instruction type");
   MBBI->setCFIType(*MBB.getParent(), 0);
+
+  if (!Check)
+    return false;
 
   // If not already bundled, bundle the check and the call to prevent
   // further changes.
@@ -89,12 +95,17 @@ bool KCFI::emitCheck(MachineBasicBlock &MBB,
 
 bool KCFI::runOnMachineFunction(MachineFunction &MF) {
   const Module *M = MF.getFunction().getParent();
-  if (!M->getModuleFlag("kcfi"))
+  if (!M->getModuleFlag("kcfi")) {
+    LLVM_DEBUG(dbgs() << "[kcfi] no 'kcfi' module flag, skipping "
+                      << MF.getName() << "\n");
     return false;
+  }
 
   const auto &SubTarget = MF.getSubtarget();
   TII = SubTarget.getInstrInfo();
   TLI = SubTarget.getTargetLowering();
+
+  LLVM_DEBUG(dbgs() << "[kcfi] running on " << MF.getName() << "\n");
 
   bool Changed = false;
   for (MachineBasicBlock &MBB : MF) {
@@ -102,8 +113,12 @@ bool KCFI::runOnMachineFunction(MachineFunction &MF) {
     for (MachineBasicBlock::instr_iterator MII = MBB.instr_begin(),
                                            MIE = MBB.instr_end();
          MII != MIE; ++MII) {
-      if (MII->isCall() && MII->getCFIType())
-        Changed |= emitCheck(MBB, MII);
+      if (MII->isCall()) {
+        LLVM_DEBUG(dbgs() << "[kcfi] call MI cfi-type="
+                          << MII->getCFIType() << ": " << *MII);
+        if (MII->getCFIType())
+          Changed |= emitCheck(MBB, MII);
+      }
     }
   }
 

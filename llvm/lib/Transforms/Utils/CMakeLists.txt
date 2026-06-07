@@ -75,6 +75,7 @@ add_llvm_component_library(LLVMTransformUtils
   ScalarEvolutionExpander.cpp
   SCCPSolver.cpp
   StripGCRelocates.cpp
+  StripSoundSpecTaint.cpp
   SSAUpdater.cpp
   SSAUpdaterBulk.cpp
   SampleProfileInference.cpp

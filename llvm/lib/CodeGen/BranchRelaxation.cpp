@@ -399,6 +399,14 @@ bool BranchRelaxation::fixupConditionalBranch(MachineInstr &MI) {
     TII->removeBranch(*MBB, &RemovedSize);
     BBSize -= RemovedSize;
   };
+  auto replaceBranch = [&](MachineBasicBlock *MBB, MachineBasicBlock *TBB,
+                           MachineBasicBlock *FBB,
+                           SmallVectorImpl<MachineOperand> &Cond) {
+    unsigned &BBSize = BlockInfo[MBB->getNumber()].Size;
+    int RemovedSize = 0, NewBrSize = 0;
+    TII->replaceBranch(*MBB, TBB, FBB, Cond, DL, &RemovedSize, &NewBrSize);
+    BBSize += NewBrSize - RemovedSize;
+  };
 
   // Populate the block offset and live-ins for a new basic block.
   auto updateOffsetAndLiveness = [&](MachineBasicBlock *NewBB) {
@@ -447,8 +455,7 @@ bool BranchRelaxation::fixupConditionalBranch(MachineInstr &MI) {
       NewBB->addSuccessor(TBB);
 
       // Replace branch in the current (MBB) block.
-      removeBranch(MBB);
-      insertBranch(MBB, NewBB, FBB, Cond);
+      replaceBranch(MBB, NewBB, FBB, Cond);
 
       TrampolineInsertionPoint = NewBB;
       updateOffsetAndLiveness(NewBB);
@@ -486,8 +493,7 @@ bool BranchRelaxation::fixupConditionalBranch(MachineInstr &MI) {
                            "its destination with "
                         << MBB->back());
 
-      removeBranch(MBB);
-      insertBranch(MBB, FBB, TBB, Cond);
+      replaceBranch(MBB, FBB, TBB, Cond);
       return true;
     }
     if (FBB) {

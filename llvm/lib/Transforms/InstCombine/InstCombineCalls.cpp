@@ -51,6 +51,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/SoundSpec.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
@@ -2448,6 +2449,52 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
     if (auto *SkippedBarrier = simplifyInvariantGroupIntrinsic(*II, *this))
       return replaceInstUsesWith(*II, SkippedBarrier);
     break;
+  case Intrinsic::soundspec_taint: {
+    Value *Arg = II->getArgOperand(0);
+
+    // taint(taint(a)) -> taint(a)
+    if (auto *Inner = dyn_cast<IntrinsicInst>(Arg))
+      if (Inner->getIntrinsicID() == Intrinsic::soundspec_taint)
+        return replaceOperand(*II, 0, Inner->getArgOperand(0));
+
+    // Push-down: op(taint(a)) -> taint(op(a)) when op is not a transmitter
+    // and the taint has a single user. Lets non-transmitter operations
+    // (arithmetic, casts, GEPs, selects, ...) optimize freely; taint then
+    // re-coalesces against the next transmitter via idempotency.
+    if (II->hasOneUse()) {
+      auto *User = dyn_cast<Instruction>(II->user_back());
+      // Block:
+      //   - Transmitters: load, store, call/invoke, branches/returns.
+      //   - Anything with side effects we don't model.
+      //   - Phis (cross-block, where to insert the new taint is unclear).
+      if (User && !User->isTerminator() && !User->mayHaveSideEffects() &&
+          !isa<LoadInst>(User) && !isa<StoreInst>(User) &&
+          !isa<CallBase>(User) && !isa<PHINode>(User)) {
+        // Substitute Arg for II in User in place.
+        User->replaceUsesOfWith(II, Arg);
+        // Build a new taint right after User.
+        Builder.SetInsertPoint(User->getNextNode());
+        Function *Decl = Intrinsic::getOrInsertDeclaration(
+            II->getModule(), Intrinsic::soundspec_taint, {User->getType()});
+        auto *NewTaint = Builder.CreateCall(Decl, {User});
+        // Redirect all uses of User to NewTaint, except NewTaint's own use.
+        // Add each redirected user to the worklist so taint(taint(...))
+        // chains created by the rewrite get re-visited and idempotency
+        // collapses them in the same pass iteration.
+        User->replaceUsesWithIf(NewTaint, [&, NewTaint](Use &U) {
+          if (U.getUser() == NewTaint)
+            return false;
+          if (auto *UI = dyn_cast<Instruction>(U.getUser()))
+            Worklist.add(UI);
+          return true;
+        });
+        Worklist.add(User);
+        Worklist.add(NewTaint);
+        return eraseInstFromFunction(*II);
+      }
+    }
+    break;
+  }
   case Intrinsic::powi:
     if (ConstantInt *Power = dyn_cast<ConstantInt>(II->getArgOperand(1))) {
       // 0 and 1 are handled in instsimplify
@@ -4777,8 +4824,14 @@ Instruction *InstCombinerImpl::visitCallBase(CallBase &Call) {
 
   // Drop unnecessary kcfi operand bundles from calls that were converted
   // into direct calls.
+  //
+  // SoundSpec: keep the bundle on direct calls when SoundSpec is enabled.
+  // IR-level "direct" calls can still lower to machine-level CALL64m through
+  // a GOT slot (`-fno-plt`-style codegen, cross-DSO refs), which the CPU
+  // sees as indirect and which SOUNDSPEC_CFI_SRC needs to protect. The
+  // bundle is what carries the type id to that codegen path.
   auto Bundle = Call.getOperandBundle(LLVMContext::OB_kcfi);
-  if (Bundle && !Call.isIndirectCall()) {
+  if (Bundle && !Call.isIndirectCall() && !soundspec::EnableSoundSpec) {
     DEBUG_WITH_TYPE(DEBUG_TYPE "-kcfi", {
       if (CalleeF) {
         ConstantInt *FunctionType = nullptr;

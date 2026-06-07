@@ -9181,13 +9181,27 @@ void SelectionDAGBuilder::LowerCallTo(const CallBase &CB, SDValue Callee,
     isTailCall = false;
 
   ConstantInt *CFIType = nullptr;
-  if (CB.isIndirectCall()) {
+  // SoundSpec: read the kcfi bundle on direct calls too. IR-level "direct"
+  // calls can still lower to machine-level CALL64m through a GOT slot
+  // (cross-DSO, default-visibility cross-crate refs, `-fno-plt`-style
+  // codegen) — the CPU sees an indirect call that SOUNDSPEC_CFI_SRC needs
+  // to protect, and EmitKCFICheck only fires when the MI carries a
+  // non-zero cfi-type populated here.
+  LLVM_DEBUG(dbgs() << "[soundspec/sdag] CB=" << CB
+                    << "  isIndirectCall=" << CB.isIndirectCall()
+                    << "  EnableSoundSpec=" << soundspec::EnableSoundSpec
+                    << "  hasKCFIBundle="
+                    << (CB.getOperandBundle(LLVMContext::OB_kcfi).has_value())
+                    << "\n");
+  if (CB.isIndirectCall() || soundspec::EnableSoundSpec) {
     if (auto Bundle = CB.getOperandBundle(LLVMContext::OB_kcfi)) {
       if (!TLI.supportKCFIBundles())
         report_fatal_error(
             "Target doesn't support calls with kcfi operand bundles.");
       CFIType = cast<ConstantInt>(Bundle->Inputs[0]);
       assert(CFIType->getType()->isIntegerTy(32) && "Invalid CFI type");
+      LLVM_DEBUG(dbgs() << "[soundspec/sdag]  -> CFIType="
+                        << CFIType->getZExtValue() << "\n");
     }
   }
 

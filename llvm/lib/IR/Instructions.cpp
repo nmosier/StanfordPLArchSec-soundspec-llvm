@@ -812,6 +812,9 @@ CallInst *CallInst::Create(CallInst *CI, ArrayRef<OperandBundleDef> OpB,
   NewCI->SubclassOptionalData = CI->SubclassOptionalData;
   NewCI->setAttributes(CI->getAttributes());
   NewCI->setDebugLoc(CI->getDebugLoc());
+  // SoundSpec: preserve !safe across bundle add/remove rebuilds. Other
+  // metadata is intentionally not copied to avoid surprising side effects.
+  NewCI->copyMetadata(*CI, {LLVMContext::MD_safe});
   return NewCI;
 }
 
@@ -891,6 +894,7 @@ InvokeInst *InvokeInst::Create(InvokeInst *II, ArrayRef<OperandBundleDef> OpB,
   NewII->SubclassOptionalData = II->SubclassOptionalData;
   NewII->setAttributes(II->getAttributes());
   NewII->setDebugLoc(II->getDebugLoc());
+  NewII->copyMetadata(*II, {LLVMContext::MD_safe});
   return NewII;
 }
 
@@ -978,6 +982,7 @@ CallBrInst *CallBrInst::Create(CallBrInst *CBI, ArrayRef<OperandBundleDef> OpB,
   NewCBI->setAttributes(CBI->getAttributes());
   NewCBI->setDebugLoc(CBI->getDebugLoc());
   NewCBI->NumIndirectDests = CBI->NumIndirectDests;
+  NewCBI->copyMetadata(*CBI, {LLVMContext::MD_safe});
   return NewCBI;
 }
 

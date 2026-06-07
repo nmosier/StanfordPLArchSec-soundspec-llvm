@@ -2991,19 +2991,7 @@ void MachineBlockPlacement::optimizeBranches() {
     LLVM_DEBUG(dbgs() << "  " << getBlockName(TBB) << " < " << getBlockName(FBB)
                       << "\n");
     auto Dl = ChainBB->findBranchDebugLoc();
-    // Capture MIFlags from the existing conditional branch(es) before the
-    // removeBranch + insertBranch rebuild below drops them (e.g.
-    // `MIFlag::Safe`, `MIFlag::Unpredictable`).
-    uint32_t PreservedCondBrFlags = 0;
-    for (const MachineInstr &MI : ChainBB->terminators())
-      if (MI.isConditionalBranch())
-        PreservedCondBrFlags |= MI.getFlags();
-    TII->removeBranch(*ChainBB);
-    TII->insertBranch(*ChainBB, FBB, TBB, Cond, Dl);
-    if (PreservedCondBrFlags)
-      for (MachineInstr &MI : ChainBB->terminators())
-        if (MI.isConditionalBranch())
-          MI.setFlags(MI.getFlags() | PreservedCondBrFlags);
+    TII->replaceBranch(*ChainBB, FBB, TBB, Cond, Dl);
   }
 }
 

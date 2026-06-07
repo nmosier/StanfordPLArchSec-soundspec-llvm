@@ -48,6 +48,7 @@
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/CFGuard.h"
+#include "llvm/Transforms/Utils/StripSoundSpecTaint.h"
 #include <memory>
 #include <optional>
 
@@ -62,6 +63,19 @@ static cl::opt<bool>
                      cl::desc("Enable the tile register allocation pass"),
                      cl::init(true), cl::Hidden);
 
+// SoundSpec: bisection knob. When on, every `llvm.soundspec.taint` call is
+// RAUW'd with its argument right before instruction selection. All IR-level
+// optimizations run with taints present (so any opt-blocking they induce
+// has already happened), but the machine code is generated as if taints
+// never existed. Compare runtime perf with this on vs off to attribute
+// overhead between IR-side opt-blocking and MIR-side overhead (extra µops,
+// load-fold blocking, scheduling restrictions).
+static cl::opt<bool> StripSoundSpecTaintPreISel(
+    "x86-strip-soundspec-taint-pre-isel",
+    cl::desc("Strip llvm.soundspec.taint calls just before instruction "
+             "selection (SoundSpec bisection knob)"),
+    cl::init(false), cl::Hidden);
+
 extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   // Register the target.
   RegisterTargetMachine<X86TargetMachine> X(getTheX86_32Target());
@@ -70,6 +84,7 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   PassRegistry &PR = *PassRegistry::getPassRegistry();
   initializeX86LowerAMXIntrinsicsLegacyPassPass(PR);
   initializeX86LowerAMXTypeLegacyPassPass(PR);
+  initializeX86LowerSoundSpecIntrinsicsLegacyPassPass(PR);
   initializeX86PreTileConfigLegacyPass(PR);
   initializeGlobalISel(PR);
   initializeWinEHStatePassPass(PR);
@@ -454,6 +469,21 @@ void X86PassConfig::addIRPasses() {
 }
 
 bool X86PassConfig::addInstSelector() {
+  // Rewrite `llvm.soundspec.taint` calls on small integer types (i1, i8,
+  // i16) into i32-typed equivalents wrapped in zext/trunc. Runs after the
+  // IR optimization pipeline so InstCombine's taint-aware folds (push-down,
+  // idempotency) still see the original-shaped intrinsic; this rewrite is
+  // purely for SDAG type legalization, which doesn't have a clean answer
+  // for i1-typed INTRINSIC_WO_CHAIN.
+  addPass(createX86LowerSoundSpecIntrinsicsPass());
+
+  // SoundSpec bisection: optionally strip all `llvm.soundspec.taint` calls
+  // right before the DAG selector runs. Lets you measure isolated IR-side
+  // opt-blocking by leaving taints in for the full IR pipeline and then
+  // removing them so codegen sees taint-free IR.
+  if (StripSoundSpecTaintPreISel)
+    addPass(createStripSoundSpecTaintLegacyPass());
+
   // Install an instruction selector.
   addPass(createX86ISelDag(getX86TargetMachine(), getOptLevel()));
 

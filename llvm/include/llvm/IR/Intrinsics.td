@@ -2956,6 +2956,20 @@ def int_protected_field_ptr :
                         [LLVMMatchType<0>, llvm_i64_ty, llvm_i1_ty],
                         [IntrNoMem, ImmArg<ArgIndex<2>>]>;
 
+//===-------------------- SoundSpec Intrinsics ----------------------------===//
+
+// llvm.soundspec.taint(<ty> %val) -> <ty>
+//
+// Identity at runtime — value is unchanged. Semantically marks %val as a
+// taint source for SoundSpec's downstream analysis. Polymorphic over any
+// type. Speculatable + IntrNoMem so the optimizer can hoist/sink/duplicate
+// freely; no `IntrNoDuplicate` because two `taint(x)` events are treated
+// as interchangeable. We deliberately do NOT register an InstSimplify /
+// ConstantFolding handler, so `taint(C)` survives constant folding.
+def int_soundspec_taint :
+  DefaultAttrsIntrinsic<[llvm_any_ty], [LLVMMatchType<0>],
+                        [IntrNoMem, IntrSpeculatable]>;
+
 //===----------------------------------------------------------------------===//
 // Target-specific intrinsics
 //===----------------------------------------------------------------------===//

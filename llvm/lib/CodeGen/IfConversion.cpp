@@ -638,8 +638,7 @@ static MachineBasicBlock *findFalseBlock(MachineBasicBlock *BB,
 bool IfConverter::reverseBranchCondition(BBInfo &BBI) const {
   DebugLoc dl;  // FIXME: this is nowhere
   if (!TII->reverseBranchCondition(BBI.BrCond)) {
-    TII->removeBranch(*BBI.BB);
-    TII->insertBranch(*BBI.BB, BBI.FalseBB, BBI.TrueBB, BBI.BrCond, dl);
+    TII->replaceBranch(*BBI.BB, BBI.FalseBB, BBI.TrueBB, BBI.BrCond, dl);
     std::swap(BBI.TrueBB, BBI.FalseBB);
     return true;
   }

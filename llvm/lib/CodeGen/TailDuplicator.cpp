@@ -806,6 +806,10 @@ bool TailDuplicator::duplicateSimpleBB(
       PredTBB = nullptr;
 
     auto DL = PredBB->findBranchDebugLoc();
+    uint32_t PreservedCondBrFlags = 0;
+    for (const MachineInstr &MI : PredBB->terminators())
+      if (MI.isConditionalBranch())
+        PreservedCondBrFlags |= MI.getFlags();
     TII->removeBranch(*PredBB);
 
     if (!PredBB->isSuccessor(NewTarget))
@@ -815,8 +819,13 @@ bool TailDuplicator::duplicateSimpleBB(
       assert(PredBB->succ_size() <= 1);
     }
 
-    if (PredTBB)
+    if (PredTBB) {
       TII->insertBranch(*PredBB, PredTBB, PredFBB, PredCond, DL);
+      if (PreservedCondBrFlags)
+        for (MachineInstr &MI : PredBB->terminators())
+          if (MI.isConditionalBranch())
+            MI.setFlags(MI.getFlags() | PreservedCondBrFlags);
+    }
 
     TDBBs.push_back(PredBB);
   }

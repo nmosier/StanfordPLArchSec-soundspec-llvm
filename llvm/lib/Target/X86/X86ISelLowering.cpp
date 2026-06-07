@@ -63029,7 +63029,27 @@ X86TargetLowering::EmitKCFICheck(MachineBasicBlock &MBB,
   // label to the landing-pad SOUNDSPEC_CFI_DEST at the call target — no
   // target-register tracking or memory-operand unfolding needed, since
   // the marker is a pure label and the call itself is unchanged.
+  //
+  // Skip direct pcrel calls (operand 0 is a global / external symbol):
+  // they're statically bound, the CPU sees a pcrel direct call, no
+  // misprediction surface for SoundSpec to cover. Only register- and
+  // memory-indirect call/tail-jump forms (CALL64r/m, TAILJMPr/m64) get
+  // the marker.
   if (soundspec::EnableSoundSpec) {
+    const MachineOperand &Target = MBBI->getOperand(0);
+    bool IsDirect =
+        Target.isGlobal() || Target.isSymbol() || Target.isMCSymbol();
+    LLVM_DEBUG(dbgs() << "[soundspec] EmitKCFICheck on MI: " << *MBBI
+                      << "  opcode=" << TII->getName(MBBI->getOpcode())
+                      << "  cfi-type=" << MBBI->getCFIType()
+                      << "  op0.isGlobal=" << Target.isGlobal()
+                      << "  op0.isSymbol=" << Target.isSymbol()
+                      << "  IsDirect=" << IsDirect << "\n");
+    if (IsDirect) {
+      LLVM_DEBUG(dbgs() << "[soundspec]  -> direct pcrel, skipping marker\n");
+      return nullptr;
+    }
+    LLVM_DEBUG(dbgs() << "[soundspec]  -> emitting SOUNDSPEC_CFI_SRC\n");
     return BuildMI(MBB, MBBI, MIMetadata(*MBBI),
                    TII->get(X86::SOUNDSPEC_CFI_SRC))
         .addImm(MBBI->getCFIType())

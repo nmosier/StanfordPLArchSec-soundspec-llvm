@@ -16,6 +16,7 @@
 #include "X86.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
@@ -26,6 +27,8 @@
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "X86InstrInfo.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
 
@@ -43,6 +46,28 @@ struct X86SoundSpecCFI final : public MachineFunctionPass {
 
 char X86SoundSpecCFI::ID = 0;
 
+static void checkIndirectBranches(MachineFunction &MF) {
+  // For now, panic if we see a safe indirect branch.
+  // Those would require CFI to maintain security.
+  for (auto &MBB : MF) {
+    for (MachineInstr &MI : MBB.terminators()) {
+      // Skip if already marked unsafe.
+      if (!MI.getFlag(MachineInstr::Safe))
+        continue;
+      // Skip if call.
+      // TODO: Assert this is bundled with source CFI label.
+      if (MI.isCall())
+        continue;
+      // Skip if not indirect branch.
+      if (!MI.isIndirectBranch())
+        continue;
+      // This is a pure indirect branch. Oh no!
+      errs() << MI << "\n";
+      report_fatal_error("encountered safe indirect branch");
+    }
+  }
+}
+
 bool X86SoundSpecCFI::runOnMachineFunction(MachineFunction &MF) {
   if (!soundspec::EnableSoundSpec)
     return false;
@@ -51,6 +76,8 @@ bool X86SoundSpecCFI::runOnMachineFunction(MachineFunction &MF) {
 
   const Function &F = MF.getFunction();
   auto *TII = MF.getSubtarget().getInstrInfo();
+
+  checkIndirectBranches(MF);
 
   // Insert CFI dest landingpads.
   // 32-bit.

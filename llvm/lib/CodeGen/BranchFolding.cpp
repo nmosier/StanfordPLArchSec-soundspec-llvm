@@ -496,8 +496,7 @@ static void FixTail(MachineBasicBlock *CurMBB, MachineBasicBlock *SuccBB,
     MachineBasicBlock *NextBB = &*I;
     if (TBB == NextBB && !Cond.empty() && !FBB) {
       if (!TII->reverseBranchCondition(Cond)) {
-        TII->removeBranch(*CurMBB);
-        TII->insertBranch(*CurMBB, SuccBB, nullptr, Cond, dl);
+        TII->replaceBranch(*CurMBB, SuccBB, nullptr, Cond, dl);
         return;
       }
     }
@@ -1156,11 +1155,12 @@ bool BranchFolder::TailMergeBlocks(MachineFunction &MF) {
         // Remove the unconditional branch at the end, if any.
         DebugLoc dl = PBB->findBranchDebugLoc();
         if (TBB && (Cond.empty() || FBB)) {
-          TII->removeBranch(*PBB);
           if (!Cond.empty())
             // reinsert conditional branch only, for now
-            TII->insertBranch(*PBB, (TBB == IBB) ? FBB : TBB, nullptr,
-                              NewCond, dl);
+            TII->replaceBranch(*PBB, (TBB == IBB) ? FBB : TBB, nullptr,
+                               NewCond, dl);
+          else
+            TII->removeBranch(*PBB);
         }
 
         MergePotentials.push_back(
@@ -1485,8 +1485,7 @@ ReoptimizeBlock:
     // the condition is false, remove the uncond second branch.
     if (PriorFBB == MBB) {
       DebugLoc Dl = PrevBB.findBranchDebugLoc();
-      TII->removeBranch(PrevBB);
-      TII->insertBranch(PrevBB, PriorTBB, nullptr, PriorCond, Dl);
+      TII->replaceBranch(PrevBB, PriorTBB, nullptr, PriorCond, Dl);
       MadeChange = true;
       ++NumBranchOpts;
       goto ReoptimizeBlock;
@@ -1499,8 +1498,7 @@ ReoptimizeBlock:
       SmallVector<MachineOperand, 4> NewPriorCond(PriorCond);
       if (!TII->reverseBranchCondition(NewPriorCond)) {
         DebugLoc Dl = PrevBB.findBranchDebugLoc();
-        TII->removeBranch(PrevBB);
-        TII->insertBranch(PrevBB, PriorFBB, nullptr, NewPriorCond, Dl);
+        TII->replaceBranch(PrevBB, PriorFBB, nullptr, NewPriorCond, Dl);
         MadeChange = true;
         ++NumBranchOpts;
         goto ReoptimizeBlock;
@@ -1537,8 +1535,7 @@ ReoptimizeBlock:
                             << "To make fallthrough to: " << *PriorTBB << "\n");
 
           DebugLoc Dl = PrevBB.findBranchDebugLoc();
-          TII->removeBranch(PrevBB);
-          TII->insertBranch(PrevBB, MBB, nullptr, NewPriorCond, Dl);
+          TII->replaceBranch(PrevBB, MBB, nullptr, NewPriorCond, Dl);
 
           // Move this block to the end of the function.
           MBB->moveAfter(&MF.back());
@@ -1600,8 +1597,7 @@ ReoptimizeBlock:
       SmallVector<MachineOperand, 4> NewCond(CurCond);
       if (!TII->reverseBranchCondition(NewCond)) {
         DebugLoc Dl = MBB->findBranchDebugLoc();
-        TII->removeBranch(*MBB);
-        TII->insertBranch(*MBB, CurFBB, CurTBB, NewCond, Dl);
+        TII->replaceBranch(*MBB, CurFBB, CurTBB, NewCond, Dl);
         MadeChange = true;
         ++NumBranchOpts;
         goto ReoptimizeBlock;
@@ -1648,8 +1644,7 @@ ReoptimizeBlock:
               PriorFBB = MBB;
             }
             DebugLoc PrevDl = PrevBB.findBranchDebugLoc();
-            TII->removeBranch(PrevBB);
-            TII->insertBranch(PrevBB, PriorTBB, PriorFBB, PriorCond, PrevDl);
+            TII->replaceBranch(PrevBB, PriorTBB, PriorFBB, PriorCond, PrevDl);
           }
 
           // Iterate through all the predecessors, revectoring each in-turn.

@@ -286,6 +286,7 @@ FunctionPass *createX86ReturnThunksPass();
 /// `soundspec_cfi(id)` function attribute.
 FunctionPass *createX86SoundSpecCFIPass();
 
+
 /// This pass insert wait instruction after X87 instructions which could raise
 /// fp exceptions when strict-fp enabled.
 FunctionPass *createX86InsertX87waitPass();
@@ -345,6 +346,7 @@ public:
 };
 
 FunctionPass *createX86LowerAMXIntrinsicsLegacyPass();
+FunctionPass *createX86LowerSoundSpecIntrinsicsPass();
 
 InstructionSelector *createX86InstructionSelector(const X86TargetMachine &TM,
                                                   const X86Subtarget &,
@@ -382,6 +384,7 @@ void initializeX86FlagsCopyLoweringLegacyPass(PassRegistry &);
 void initializeX86LoadValueInjectionLoadHardeningPassPass(PassRegistry &);
 void initializeX86LoadValueInjectionRetHardeningPassPass(PassRegistry &);
 void initializeX86LowerAMXIntrinsicsLegacyPassPass(PassRegistry &);
+void initializeX86LowerSoundSpecIntrinsicsLegacyPassPass(PassRegistry &);
 void initializeX86LowerAMXTypeLegacyPassPass(PassRegistry &);
 void initializeX86LowerTileCopyLegacyPass(PassRegistry &);
 void initializeX86OptimizeLEAsLegacyPass(PassRegistry &);

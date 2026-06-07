@@ -105,6 +105,27 @@ static bool isAsmComment(const char *Str, const MCAsmInfo &MAI) {
 /// Variable-length instructions are not handled here; this function
 /// may be overloaded in the target code to do that.
 /// We implement a special case of the .space directive which takes only a
+unsigned TargetInstrInfo::replaceBranch(MachineBasicBlock &MBB,
+                                         MachineBasicBlock *TBB,
+                                         MachineBasicBlock *FBB,
+                                         ArrayRef<MachineOperand> Cond,
+                                         const DebugLoc &DL, int *BytesRemoved,
+                                         int *BytesAdded) const {
+  // Capture MIFlags on the existing conditional branch(es) before they're
+  // erased so they survive the rebuild (e.g. MIFlag::Safe, Unpredictable).
+  uint32_t PreservedFlags = 0;
+  for (const MachineInstr &MI : MBB.terminators())
+    if (MI.isConditionalBranch())
+      PreservedFlags |= MI.getFlags();
+  removeBranch(MBB, BytesRemoved);
+  unsigned Inserted = insertBranch(MBB, TBB, FBB, Cond, DL, BytesAdded);
+  if (PreservedFlags)
+    for (MachineInstr &MI : MBB.terminators())
+      if (MI.isConditionalBranch())
+        MI.setFlags(MI.getFlags() | PreservedFlags);
+  return Inserted;
+}
+
 /// single integer argument in base 10 that is the size in bytes. This is a
 /// restricted form of the GAS directive in that we only interpret
 /// simple--i.e. not a logical or arithmetic expression--size values without
