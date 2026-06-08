@@ -72,6 +72,9 @@ bool X86SoundSpecCFI::runOnMachineFunction(MachineFunction &MF) {
   if (!soundspec::EnableSoundSpec)
     return false;
 
+  LLVM_DEBUG(dbgs() << "CFI is disabled for now\n");
+  return false;
+
   LLVM_DEBUG(dbgs() << getPassName() << "\n");
 
   const Function &F = MF.getFunction();
@@ -94,6 +97,8 @@ bool X86SoundSpecCFI::runOnMachineFunction(MachineFunction &MF) {
   BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::SOUNDSPEC_CFI_DEST))
       .addImm(DestLabel);
 
+  // FIXME: Probably won't have time to re-enable this.
+#if 0
   // If this function is unsafe -or- it has a `self` argument, then mask in any
   // branch.
   auto UnsafeArg = [&F](const Argument &A) -> bool {
@@ -101,6 +106,7 @@ bool X86SoundSpecCFI::runOnMachineFunction(MachineFunction &MF) {
   };
   if (!F.getMetadata(LLVMContext::MD_safe) || any_of(F.args(), UnsafeArg))
     BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::UNSAFE_POST));
+#endif
 
   // We unconditionally inserted SOUNDSPEC_CFI_DEST above, so MIR changed.
   return true;

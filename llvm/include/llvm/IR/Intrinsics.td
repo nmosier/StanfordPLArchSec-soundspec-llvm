@@ -2970,6 +2970,17 @@ def int_soundspec_taint :
   DefaultAttrsIntrinsic<[llvm_any_ty], [LLVMMatchType<0>],
                         [IntrNoMem, IntrSpeculatable]>;
 
+// llvm.soundspec.delay_if_zero(<ty> %val) -> <ty>
+//
+// Identity at runtime. Semantically tells SoundSpec to stall the speculative
+// pipeline on this value if it is zero (transient-fault primitive). Lowers
+// to `DELAY Rd, Rs` with both operands the same physical register —
+// modeled as a tied-dst self-DELAY. Polymorphic over any single-register
+// type (i32 / i64; pointer types match LLVMMatchType<0> as well).
+def int_soundspec_delay_if_zero :
+  DefaultAttrsIntrinsic<[llvm_any_ty], [LLVMMatchType<0>],
+                        [IntrNoMem, IntrSpeculatable]>;
+
 //===----------------------------------------------------------------------===//
 // Target-specific intrinsics
 //===----------------------------------------------------------------------===//

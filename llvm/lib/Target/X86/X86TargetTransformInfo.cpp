@@ -3634,6 +3634,22 @@ unsigned X86TTIImpl::getAtomicMemIntrinsicMaxElementSize() const { return 16; }
 InstructionCost
 X86TTIImpl::getIntrinsicInstrCost(const IntrinsicCostAttributes &ICA,
                                   TTI::TargetCostKind CostKind) const {
+  // SoundSpec markers (`llvm.soundspec.taint`, `llvm.soundspec.delay.if.zero`)
+  // lower to single-cycle NOP-shaped reserved-NOP encodings on the SoundSpec
+  // pipeline (the `TAINT32r`/`TAINT64r`/`DELAYr` td patterns in
+  // X86InstrCompiler.td) and don't take a register-allocation slot beyond the
+  // tied-dst self-op. They must not count against the loop unroller's body-
+  // size budget — otherwise hot loops with one of these in the body (the
+  // slice-iter end-check transmute, etc.) silently lose unrolling and we
+  // eat a major perf hit on dependent code.
+  switch (ICA.getID()) {
+  case Intrinsic::soundspec_taint:
+  case Intrinsic::soundspec_delay_if_zero:
+    return TTI::TCC_Free;
+  default:
+    break;
+  }
+
   // Costs should match the codegen from:
   // BITREVERSE: llvm\test\CodeGen\X86\vector-bitreverse.ll
   // BSWAP: llvm\test\CodeGen\X86\bswap-vector.ll

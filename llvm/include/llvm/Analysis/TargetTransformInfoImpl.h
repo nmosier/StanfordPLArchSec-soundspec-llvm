@@ -895,6 +895,13 @@ public:
     case Intrinsic::threadlocal_address:
     case Intrinsic::experimental_widenable_condition:
     case Intrinsic::ssa_copy:
+    // SoundSpec taint/delay_if_zero each lower to a single NOP-class
+    // instruction (`0F 19 /r`, `0F 1D /r`) — pipeline-wise a register move,
+    // not a real call. Costing them as zero is critical for LoopUnroll /
+    // CodeMetrics / InlineCost, which otherwise treat the IR-level call as
+    // expensive enough to push hot loops over the unroll threshold.
+    case Intrinsic::soundspec_taint:
+    case Intrinsic::soundspec_delay_if_zero:
       // These intrinsics don't actually represent code after lowering.
       return 0;
     }

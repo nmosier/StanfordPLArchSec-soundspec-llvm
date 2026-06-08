@@ -1612,6 +1612,29 @@ AliasResult BasicAAResult::aliasCheck(const Value *V1, LocationSize V1Size,
   if (isValueEqualInPotentialCycles(V1, V2, AAQI))
     return AliasResult::MustAlias;
 
+  // SoundSpec taint look-through. `llvm.soundspec.taint(p)` addresses the
+  // same memory as `p`, so AA reasons about the underlying pointer for
+  // disambiguation — that's how callers get NoAlias / PartialAlias to
+  // unblock LICM / DSE / MemDep around tainted pointers. We then downgrade
+  // any MustAlias result to MayAlias: exposing MustAlias would let GVN
+  // forward a load through `taint(p)` to a prior load through `p`,
+  // bypassing the speculative-dataflow dependency the taint is there to
+  // build. (Self-aliasing of the *same* taint SSA value is already caught
+  // by isValueEqualInPotentialCycles above, so it returns MustAlias
+  // directly without going through this downgrade.)
+  auto IsTaint = [](const Value *V) {
+    const auto *Call = dyn_cast<CallBase>(V);
+    return Call && Call->getIntrinsicID() == Intrinsic::soundspec_taint;
+  };
+  if (IsTaint(V1) || IsTaint(V2)) {
+    const Value *T1 = IsTaint(V1) ? cast<CallBase>(V1)->getArgOperand(0) : V1;
+    const Value *T2 = IsTaint(V2) ? cast<CallBase>(V2)->getArgOperand(0) : V2;
+    AliasResult R = aliasCheck(T1, V1Size, T2, V2Size, AAQI, CtxI);
+    if (R == AliasResult::MustAlias)
+      R = AliasResult::MayAlias;
+    return R;
+  }
+
   // Figure out what objects these things are pointing to if we can.
   const Value *O1 = getUnderlyingObject(V1, MaxLookupSearchDepth);
   const Value *O2 = getUnderlyingObject(V2, MaxLookupSearchDepth);

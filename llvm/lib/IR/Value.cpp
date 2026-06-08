@@ -910,6 +910,12 @@ uint64_t Value::getPointerDereferenceableBytes(const DataLayout &DL,
       CanBeNull = true;
     }
   } else if (const auto *Call = dyn_cast<CallBase>(this)) {
+    // SoundSpec taint is identity — the produced pointer addresses the same
+    // memory as its operand, so deref/null/freed properties are inherited.
+    // Fact propagation only; the call remains in IR.
+    if (Call->getIntrinsicID() == Intrinsic::soundspec_taint)
+      return Call->getArgOperand(0)->getPointerDereferenceableBytes(
+          DL, CanBeNull, CanBeFreed);
     DerefBytes = Call->getRetDereferenceableBytes();
     if (DerefBytes == 0) {
       DerefBytes = Call->getRetDereferenceableOrNullBytes();
@@ -998,6 +1004,9 @@ Align Value::getPointerAlignment(const DataLayout &DL) const {
   } else if (const AllocaInst *AI = dyn_cast<AllocaInst>(this)) {
     return AI->getAlign();
   } else if (const auto *Call = dyn_cast<CallBase>(this)) {
+    // SoundSpec taint inherits its operand's alignment — identity pointer.
+    if (Call->getIntrinsicID() == Intrinsic::soundspec_taint)
+      return Call->getArgOperand(0)->getPointerAlignment(DL);
     MaybeAlign Alignment = Call->getRetAlign();
     if (!Alignment && Call->getCalledFunction())
       Alignment = Call->getCalledFunction()->getAttributes().getRetAlignment();

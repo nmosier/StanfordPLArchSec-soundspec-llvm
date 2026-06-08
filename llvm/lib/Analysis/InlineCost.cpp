@@ -2528,6 +2528,7 @@ bool CallAnalyzer::visitCallBase(CallBase &Call) {
       return false;
     case Intrinsic::launder_invariant_group:
     case Intrinsic::strip_invariant_group:
+    case Intrinsic::soundspec_taint:
       if (auto *SROAArg = getSROAArgForValueOrNull(II->getOperand(0)))
         SROAArgValues[II] = SROAArg;
       return true;

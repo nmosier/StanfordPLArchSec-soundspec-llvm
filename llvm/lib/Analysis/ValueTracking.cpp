@@ -2035,6 +2035,14 @@ static void computeKnownBitsFromOperator(const Operator *I,
       switch (II->getIntrinsicID()) {
       default:
         break;
+      case Intrinsic::soundspec_taint:
+        // Identity intrinsic — bits of taint(x) match bits of x. Look-through
+        // here is fact propagation only; the call itself stays in IR (no
+        // `returned` attribute, no stripper, no fold), so SoundSpec's
+        // dataflow dependency on the taint result is preserved.
+        computeKnownBits(I->getOperand(0), DemandedElts, Known2, Q, Depth + 1);
+        Known = Known.unionWith(Known2);
+        break;
       case Intrinsic::abs: {
         computeKnownBits(I->getOperand(0), DemandedElts, Known2, Q, Depth + 1);
         bool IntMinIsPoison = match(II->getArgOperand(1), m_One());
@@ -3563,6 +3571,7 @@ static bool isKnownNonZeroFromOperator(const Operator *I,
       case Intrinsic::bitreverse:
       case Intrinsic::bswap:
       case Intrinsic::ctpop:
+      case Intrinsic::soundspec_taint:
         return isKnownNonZero(II->getArgOperand(0), DemandedElts, Q, Depth);
         // NB: We don't do usub_sat here as in any case we can prove its
         // non-zero, we will fold it to `sub nuw` in InstCombine.
@@ -4583,6 +4592,10 @@ static unsigned ComputeNumSignBitsImpl(const Value *V,
         switch (II->getIntrinsicID()) {
         default:
           break;
+        case Intrinsic::soundspec_taint:
+          // Identity — sign-bit count matches the operand exactly.
+          return ComputeNumSignBits(U->getOperand(0), DemandedElts, Q,
+                                    Depth + 1);
         case Intrinsic::abs:
           Tmp =
               ComputeNumSignBits(U->getOperand(0), DemandedElts, Q, Depth + 1);
@@ -5101,6 +5114,11 @@ void computeKnownFPClass(const Value *V, const APInt &DemandedElts,
     const CallInst *II = cast<CallInst>(Op);
     const Intrinsic::ID IID = II->getIntrinsicID();
     switch (IID) {
+    case Intrinsic::soundspec_taint:
+      // Identity — FP class of taint(x) is FP class of x.
+      computeKnownFPClass(II->getArgOperand(0), DemandedElts, InterestedClasses,
+                          Known, Q, Depth + 1);
+      break;
     case Intrinsic::fabs: {
       if ((InterestedClasses & (fcNan | fcPositive)) != fcNone) {
         // If we only care about the sign bit we don't need to inspect the

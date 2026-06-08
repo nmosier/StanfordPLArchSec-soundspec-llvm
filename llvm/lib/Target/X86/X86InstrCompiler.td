@@ -363,6 +363,33 @@ let mayLoad = 0, mayStore = 0,
                     "taint128\t$src", []>, TB, Sched<[]>;
 }
 
+// SoundSpec DELAY — encoded as `0F 1D /r` with ModR/M mod=11/reg=ddd/rm=sss
+// (MRMSrcReg form): `delay Rd, Rs` where Rd is in modrm.reg and Rs in
+// modrm.r/m. Sits in the `0F 1D` reserved no-op slot, distinct from `0F 19`
+// (UNSAFE_POST / TAINT GPR) and `0F 1C` (TAINT128r).
+//
+// $dst is both input and output (tied to $src1); $src2 is a pure source. No
+// hasSideEffects — like TAINT, the architectural value is identity at
+// runtime and ordering is enforced by the SoundSpec data-dependence model,
+// not by MIR-level side-effect bits.
+let mayLoad = 0, mayStore = 0, Constraints = "$src1 = $dst" in {
+  def DELAY32rr : I<0x1D, MRMSrcReg, (outs GR32:$dst),
+                    (ins GR32:$src1, GR32:$src2),
+                    "delay{l}\t{$src2, $dst|$dst, $src2}", []>, TB, Sched<[]>;
+  def DELAY64rr : RI<0x1D, MRMSrcReg, (outs GR64:$dst),
+                     (ins GR64:$src1, GR64:$src2),
+                     "delay{q}\t{$src2, $dst|$dst, $src2}", []>, TB, Sched<[]>;
+}
+
+// `llvm.soundspec.delay_if_zero(%val)` → `DELAY Rd, Rs` with both operands
+// the same SSA value. The tied $src1 = $dst constraint plus identical $src2
+// means regalloc will allocate one physical register for the whole MI, and
+// the encoder emits `0F 1D /r` with modrm.reg == modrm.r/m.
+def : Pat<(i32 (int_soundspec_delay_if_zero GR32:$val)),
+          (DELAY32rr GR32:$val, GR32:$val)>;
+def : Pat<(i64 (int_soundspec_delay_if_zero GR64:$val)),
+          (DELAY64rr GR64:$val, GR64:$val)>;
+
 // Patterns matching `llvm.soundspec.taint` of any 128-bit-vector MVT to
 // TAINT128r. The instruction is opcode-/encoding-identical for all of
 // these — the lane element type doesn't matter at the machine level since

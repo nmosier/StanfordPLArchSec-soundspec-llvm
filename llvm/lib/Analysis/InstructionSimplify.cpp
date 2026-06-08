@@ -6311,6 +6311,7 @@ static bool isIdempotent(Intrinsic::ID ID) {
   case Intrinsic::roundeven:
   case Intrinsic::canonicalize:
   case Intrinsic::arithmetic_fence:
+  case Intrinsic::soundspec_delay_if_zero:
     return true;
   }
 }
@@ -6459,6 +6460,14 @@ static Value *simplifyUnaryIntrinsic(Function *F, Value *Op0,
 
   Value *X;
   switch (IID) {
+  case Intrinsic::soundspec_delay_if_zero:
+    // delay_if_zero(x) stalls iff x is zero. If x is provably non-zero,
+    // the dynamic stall can never fire and the intrinsic is identity.
+    // Picks up `nonnull` attributes, `dereferenceable`, prior icmp facts,
+    // KnownBits, etc. via isKnownNonZero.
+    if (isKnownNonZero(Op0, Q))
+      return Op0;
+    break;
   case Intrinsic::fabs:
     if (computeKnownFPSignBit(Op0, Q) == false)
       return Op0;
