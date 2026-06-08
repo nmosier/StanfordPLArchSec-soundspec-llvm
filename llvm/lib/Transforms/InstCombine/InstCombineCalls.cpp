@@ -2461,15 +2461,24 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
     // and the taint has a single user. Lets non-transmitter operations
     // (arithmetic, casts, GEPs, selects, ...) optimize freely; taint then
     // re-coalesces against the next transmitter via idempotency.
+    //
+    // FIXME: Revisit whether this push-down is worth keeping at all. It
+    // complicates taint reasoning and its payoff (letting intervening ops
+    // fold) is unproven. If it stays, the block-list below must keep growing
+    // to exclude any op we don't want taint to migrate across.
     if (II->hasOneUse()) {
       auto *User = dyn_cast<Instruction>(II->user_back());
       // Block:
       //   - Transmitters: load, store, call/invoke, branches/returns.
       //   - Anything with side effects we don't model.
       //   - Phis (cross-block, where to insert the new taint is unclear).
+      //   - Comparisons: pushing through icmp/fcmp collapses a wide data
+      //     taint into an i1 predicate taint, stripping taint off the actual
+      //     secret-bearing operand the gate watches. Keep taint on the data.
       if (User && !User->isTerminator() && !User->mayHaveSideEffects() &&
           !isa<LoadInst>(User) && !isa<StoreInst>(User) &&
-          !isa<CallBase>(User) && !isa<PHINode>(User)) {
+          !isa<CallBase>(User) && !isa<PHINode>(User) &&
+          !isa<CmpInst>(User)) {
         // Substitute Arg for II in User in place.
         User->replaceUsesOfWith(II, Arg);
         // Build a new taint right after User.
