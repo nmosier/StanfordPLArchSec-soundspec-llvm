@@ -349,7 +349,15 @@ let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in {
 // FR32/FR64 — they share the underlying XMM register file). No td-side
 // matching pattern: the dispatcher is target C++ (either an MI-pass after
 // RegAlloc, or the IR pre-pass for shape rewrites).
-let mayLoad = 0, mayStore = 0,
+// `int_soundspec_taint` is modeled as writing inaccessible memory, so its
+// selection pattern forces `mayStore = 1` on the selecting instructions —
+// otherwise TableGen reports "Pattern doesn't match mayStore = 0".
+// NOTE: at the MIR level this makes TAINT a may-store op. Since no memory
+// operand is attached, machine passes treat it as aliasing all memory (a
+// conservative scheduling barrier). If that pessimizes codegen, attach an
+// inaccessible-mem MachineMemOperand during lowering so machine AA can
+// disambiguate it from real loads/stores.
+let mayLoad = 0, mayStore = 1,
     Constraints = "$src = $dst" in {
   def TAINT32r : I<0x19, MRM1r, (outs GR32:$dst), (ins GR32:$src),
                    "taint{l}\t$src",
