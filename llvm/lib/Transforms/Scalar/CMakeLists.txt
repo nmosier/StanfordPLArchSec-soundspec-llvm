@@ -75,6 +75,7 @@ add_llvm_component_library(LLVMScalarOpts
   SimpleLoopUnswitch.cpp
   SimplifyCFGPass.cpp
   Sink.cpp
+  SoundSpecPreprocess.cpp
   SpeculativeExecution.cpp
   StraightLineStrengthReduce.cpp
   StructurizeCFG.cpp
