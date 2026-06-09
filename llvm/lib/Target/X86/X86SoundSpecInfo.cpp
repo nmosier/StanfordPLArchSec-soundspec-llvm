@@ -8,6 +8,10 @@
 using namespace llvm;
 
 bool llvm::X86::soundspec::maybeSpeculationPrimitive(const MachineInstr &MI) {
+  // For now, we're just considering conditional branches.
+  return MI.isConditionalBranch();
+
+#if 0
   auto &MF = *MI.getMF();
   auto &MBB = *MI.getParent();
 
@@ -34,4 +38,5 @@ bool llvm::X86::soundspec::maybeSpeculationPrimitive(const MachineInstr &MI) {
 
   // Otherwise, not a speculation primitive.
   return false;
+#endif
 }

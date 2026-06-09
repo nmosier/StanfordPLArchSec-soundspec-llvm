@@ -53,6 +53,7 @@
 #include "llvm/Transforms/CFGuard.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizerCommon.h"
+#include "llvm/IR/SoundSpec.h"
 #include <string>
 
 using namespace llvm;
@@ -414,7 +415,7 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   // SoundSpec: tag the MCInst when the source MI is a speculation primitive
   // that wasn't marked `safe`. Encoded as IP_HAS_UNSAFE in MCInst::Flags;
   // X86MCCodeEmitter emits a 0x36 (legacy SS, repurposed) prefix byte.
-  if (!MI->getFlag(MachineInstr::MIFlag::Safe) &&
+  if (soundspec::EnableSoundSpec && !MI->getFlag(MachineInstr::MIFlag::Safe) &&
       X86::soundspec::maybeSpeculationPrimitive(*MI))
     OutMI.setFlags(OutMI.getFlags() | X86::IP_HAS_UNSAFE);
 
