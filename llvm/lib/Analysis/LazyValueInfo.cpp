@@ -1584,6 +1584,7 @@ static ValueLatticeElement constantFoldUser(User *Usr, Value *Op,
 std::optional<ValueLatticeElement>
 LazyValueInfoImpl::getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
                                      BasicBlock *BBTo, bool UseBlockValue) {
+#if 0
   // [soundspec] If the terminator is safe, bail.
   // FIXME: This can be optimized in the future: techically, it can be used to elide
   // other safe branches. But, that would require a deeper analysis of users
@@ -1592,7 +1593,16 @@ LazyValueInfoImpl::getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
     ++SoundSpecEdgeValueLocalBails;
     return ValueLatticeElement::getOverdefined();
   }
-  
+#else
+  // [soundspec]
+  // Bail unconditionally for now. We can do something more intelligent later if
+  // needed.
+  if (soundspec::EnableSoundSpec) {
+    ++SoundSpecEdgeValueLocalBails;
+    return ValueLatticeElement::getOverdefined();
+  }
+#endif
+
   // TODO: Handle more complex conditionals. If (v == 0 || v2 < 1) is false, we
   // know that v != 0.
   if (BranchInst *BI = dyn_cast<BranchInst>(BBFrom->getTerminator())) {
