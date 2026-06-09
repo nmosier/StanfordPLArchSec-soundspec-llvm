@@ -32,3 +32,8 @@ bool soundspec::isUnsafeFunction(const Function &F) {
   // If no speculation primitives are !safe, then consider it safe.
   return none_of(instructions(F), soundspec::isSafe);
 }
+
+bool soundspec::isTaint(const Value *V) {
+  const auto *II = dyn_cast_or_null<IntrinsicInst>(V);
+  return II && II->getIntrinsicID() == Intrinsic::soundspec_taint;
+}

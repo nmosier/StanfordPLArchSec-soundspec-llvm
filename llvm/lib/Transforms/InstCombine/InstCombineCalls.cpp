@@ -2450,57 +2450,53 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
       return replaceInstUsesWith(*II, SkippedBarrier);
     break;
   case Intrinsic::soundspec_taint: {
+    using namespace llvm::PatternMatch;
+
     Value *Arg = II->getArgOperand(0);
 
     // taint(taint(a)) -> taint(a)
-    if (auto *Inner = dyn_cast<IntrinsicInst>(Arg))
-      if (Inner->getIntrinsicID() == Intrinsic::soundspec_taint)
-        return replaceOperand(*II, 0, Inner->getArgOperand(0));
+    Value *InnerOp;
+    if (match(Arg, m_Intrinsic<Intrinsic::soundspec_taint>(m_Value(InnerOp))))
+      return replaceOperand(*II, 0, InnerOp);
 
-    // Push-down: op(taint(a)) -> taint(op(a)) when op is not a transmitter
-    // and the taint has a single user. Lets non-transmitter operations
-    // (arithmetic, casts, GEPs, selects, ...) optimize freely; taint then
-    // re-coalesces against the next transmitter via idempotency.
+    // intra-block:
+    // b = taint(a)
+    // ...
+    // c = taint(a)
+    // replace all with b.
+    // TODO
+    
+    // Hoist taint above a constant-offset GEP that feeds only this taint:
+    //   taint(getelementptr %x, <const...>)
+    //     -> getelementptr (taint %x), <const...>
+    // Relocating the taint onto the shared base pointer lets GVN/CSE dedupe
+    // the (now syntactically identical) constant GEPs across paths. Because
+    // every index is constant, the GEP introduces no tainted data of its own
+    // — only %x carries taint — so this is value-equivalent.
     //
-    // FIXME: Revisit whether this push-down is worth keeping at all. It
-    // complicates taint reasoning and its payoff (letting intervening ops
-    // fold) is unproven. If it stays, the block-list below must keep growing
-    // to exclude any op we don't want taint to migrate across.
-    if (II->hasOneUse()) {
-      auto *User = dyn_cast<Instruction>(II->user_back());
-      // Block:
-      //   - Transmitters: load, store, call/invoke, branches/returns.
-      //   - Anything with side effects we don't model.
-      //   - Phis (cross-block, where to insert the new taint is unclear).
-      //   - Comparisons: pushing through icmp/fcmp collapses a wide data
-      //     taint into an i1 predicate taint, stripping taint off the actual
-      //     secret-bearing operand the gate watches. Keep taint on the data.
-      if (User && !User->isTerminator() && !User->mayHaveSideEffects() &&
-          !isa<LoadInst>(User) && !isa<StoreInst>(User) &&
-          !isa<CallBase>(User) && !isa<PHINode>(User) &&
-          !isa<CmpInst>(User)) {
-        // Substitute Arg for II in User in place.
-        User->replaceUsesOfWith(II, Arg);
-        // Build a new taint right after User.
-        Builder.SetInsertPoint(User->getNextNode());
-        Function *Decl = Intrinsic::getOrInsertDeclaration(
-            II->getModule(), Intrinsic::soundspec_taint, {User->getType()});
-        auto *NewTaint = Builder.CreateCall(Decl, {User});
-        // Redirect all uses of User to NewTaint, except NewTaint's own use.
-        // Add each redirected user to the worklist so taint(taint(...))
-        // chains created by the rewrite get re-visited and idempotency
-        // collapses them in the same pass iteration.
-        User->replaceUsesWithIf(NewTaint, [&, NewTaint](Use &U) {
-          if (U.getUser() == NewTaint)
-            return false;
-          if (auto *UI = dyn_cast<Instruction>(U.getUser()))
-            Worklist.add(UI);
-          return true;
-        });
-        Worklist.add(User);
-        Worklist.add(NewTaint);
-        return eraseInstFromFunction(*II);
-      }
+    // Guards:
+    //   - GEP single-use: its only user is this taint, so rewriting it can't
+    //     change what any other instruction observes.
+    //   - All-constant indices: a variable index would itself be a (possibly
+    //     tainted) value we'd be dropping the taint off of.
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(Arg);
+        GEP && GEP->hasOneUse() && GEP->hasAllConstantIndices()) {
+      Value *Base = GEP->getPointerOperand();
+      // Builder inserts before II; Base dominates II (it feeds GEP which
+      // feeds II), so the new taint is well-formed at this point.
+      Function *Decl = Intrinsic::getOrInsertDeclaration(
+          II->getModule(), Intrinsic::soundspec_taint, {Base->getType()});
+      CallInst *BaseTaint = Builder.CreateCall(Decl, {Base});
+      // Carry provenance (soundspec.comment, !dbg, ...) onto the new taint.
+      BaseTaint->copyMetadata(*II);
+      // Rebuild the GEP on the tainted base, preserving nowrap flags. The
+      // old GEP is left dead (single-use) for DCE to reap.
+      auto *NewGEP =
+          GetElementPtrInst::Create(GEP->getSourceElementType(), BaseTaint,
+                                    SmallVector<Value *>(GEP->indices()));
+      NewGEP->setNoWrapFlags(GEP->getNoWrapFlags());
+      NewGEP->takeName(GEP);
+      return NewGEP;
     }
     break;
   }

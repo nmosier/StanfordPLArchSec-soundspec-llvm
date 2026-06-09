@@ -2961,14 +2961,31 @@ def int_protected_field_ptr :
 // llvm.soundspec.taint(<ty> %val) -> <ty>
 //
 // Identity at runtime — value is unchanged. Semantically marks %val as a
-// taint source for SoundSpec's downstream analysis. Polymorphic over any
-// type. Speculatable + IntrNoMem so the optimizer can hoist/sink/duplicate
-// freely; no `IntrNoDuplicate` because two `taint(x)` events are treated
-// as interchangeable. We deliberately do NOT register an InstSimplify /
+// taint source for SoundSpec's downstream analysis. Polymorphic over any type.
+//
+// Kept PURE (`IntrNoMem`: readnone, plus the default nounwind/willreturn).
+// Purity is required so the loop vectorizer accepts taint-carrying loops (see
+// llvm::isTriviallyVectorizable, where this intrinsic is registered) and widens
+// `taint.iN` -> `taint.<VF x iN>` instead of bailing on an unknown call.
+// Deliberately NOT `IntrSpeculatable`: a taint must not be hoisted/sunk onto a
+// control-flow path it wouldn't otherwise execute, so leaving it
+// non-speculatable keeps LICM / SimplifyCFG / generic speculation from moving
+// it across branches.
+//
+// Purity does make taint freely CSE-able — including ACROSS branches, which is
+// wrong: a taint is control-dependent, so two `taint(x)` on different paths are
+// not interchangeable even though they compute the same value. We therefore
+// forbid cross-block merging in the value-numbering passes (EarlyCSE, GVN,
+// NewGVN, GVNHoist) by keying their existing convergent-style "same basic block
+// only" guards on this intrinsic via `soundspec::isTaint` — WITHOUT marking it
+// `convergent`, which would re-block vectorization. Same-block (control-
+// equivalent) merging stays allowed.
+//
+// No `IntrNoDuplicate`. We also deliberately do NOT register an InstSimplify /
 // ConstantFolding handler, so `taint(C)` survives constant folding.
 def int_soundspec_taint :
   DefaultAttrsIntrinsic<[llvm_any_ty], [LLVMMatchType<0>],
-                        [IntrNoMem, IntrSpeculatable]>;
+                        [IntrNoMem]>;
 
 // llvm.soundspec.delay_if_zero(<ty> %val) -> <ty>
 //

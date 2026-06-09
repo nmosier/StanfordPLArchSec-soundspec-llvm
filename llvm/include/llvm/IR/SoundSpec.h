@@ -6,6 +6,7 @@ namespace llvm {
 
 class Instruction;
 class Function;
+class Value;
 
 namespace soundspec {
 
@@ -16,6 +17,9 @@ bool isSafe(const Instruction &I);
 
 bool isUnsafeFunction(const Function &F);
 
-}
+// True iff V is a call to the `llvm.soundspec.taint` intrinsic.
+bool isTaint(const Value *V);
+
+} // namespace soundspec
 
 } // namespace llvm
