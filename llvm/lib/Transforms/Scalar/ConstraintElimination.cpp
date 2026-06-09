@@ -1265,8 +1265,8 @@ void State::addInfoFor(BasicBlock &BB) {
   // universal value fact. Skip pushing per-successor facts derived from its
   // condition into the constraint system; downstream `addFact`/check
   // resolution then can't use those facts to fold unsafe primitives.
-  if (soundspec::EnableSoundSpec &&
-      soundspec::isSafe(*BB.getTerminator())) {
+  // FIXME: Unconditionally bailing for now.
+  if (soundspec::EnableSoundSpec) {
     ++soundspecConstraintEdgeFactBails;
     return;
   }

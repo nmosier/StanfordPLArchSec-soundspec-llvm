@@ -35,10 +35,12 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsX86.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
 
@@ -78,7 +80,9 @@ FunctionPass *llvm::createX86LowerSoundSpecIntrinsicsPass() {
 
 static cl::opt<bool> InsertLFENCEs(DEBUG_TYPE "-lfences", cl::init(true),
                                    cl::Hidden);
-static cl::opt<bool> StripTaint(DEBUG_TYPE "-strip", cl::init(false), cl::Hidden);
+static cl::opt<bool> StripTaint(DEBUG_TYPE "-strip", cl::init(false),
+                                cl::Hidden);
+static cl::opt<bool> InsertChecks(DEBUG_TYPE "-check", cl::init(false), cl::Hidden);
 
 static Value *CreateTaint(IRBuilderBase &IRB, Value *Op) {
   return IRB.CreateUnaryIntrinsic(Intrinsic::soundspec_taint, Op);
@@ -171,13 +175,63 @@ static bool stripTaint(Function &F) {
   return Changed;
 }
 
+static bool insertChecks(Function &F) {
+  using namespace llvm::PatternMatch;
+
+  bool Changed = true;
+  auto &Ctx = F.getContext();
+
+  // Create a fail block.
+  auto *FailB = BasicBlock::Create(Ctx, "soundspec.check.fail", &F);
+  IRBuilder<> IRB(FailB);
+  IRB.CreateIntrinsic(Intrinsic::trap, {});
+  IRB.CreateUnreachable();
+
+  SmallVector<Instruction *> Todo;
+  for (auto &I : instructions(F)) {
+    if (!match(&I, m_Intrinsic<Intrinsic::soundspec_delay_if_zero>(m_Value())))
+      continue;
+    Todo.push_back(&I);
+  }
+
+  // For each llvm.soundspec.delay_if_zero intrinsic, split the block at the
+  // intrinsic + add a check. Re-read the operand each iteration: a prior
+  // iteration's RAUW may have rewritten this call's operand to bypass an
+  // already-erased earlier `delay_if_zero` in a chain. Caching the operand
+  // at gather time would leave it dangling and crash the verifier.
+  for (Instruction *I : Todo) {
+    Value *Op = I->getOperand(0);
+    assert(I != Op);
+    LLVM_DEBUG(dbgs() << "before check:\n" << *I->getParent() << "\n");
+    auto *B = I->getParent();
+    auto *NewB = B->splitBasicBlock(I);
+    I->replaceAllUsesWith(Op);
+    I->eraseFromParent();
+    B->getTerminator()->eraseFromParent();
+    IRBuilder<> IRB(B);
+    assert(!B->getTerminator());
+    auto *IsZero = IRB.CreateICmpEQ(Op, Constant::getNullValue(Op->getType()));
+    IRB.CreateCondBr(IsZero, FailB, NewB);
+    LLVM_DEBUG(dbgs() << "after check:\n" << *B << "\n" << *NewB << "\n");
+  }
+
+  verifyFunction(F, &errs());
+
+  return Changed;
+}
+
 bool X86LowerSoundSpecIntrinsicsLegacyPass::runOnFunction(Function &F) {
+  bool ChangedOverall = false;
+
   if (StripTaint) {
     return stripTaint(F);
   }
 
+  if (InsertChecks) {
+    ChangedOverall |= insertChecks(F);
+  }
+
   using namespace llvm::PatternMatch;
-  bool ChangedOverall = false;
   bool Changed;
   do {
     Changed = false;

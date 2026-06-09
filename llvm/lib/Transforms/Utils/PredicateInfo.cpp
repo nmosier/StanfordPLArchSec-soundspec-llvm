@@ -411,7 +411,8 @@ void PredicateInfoBuilder::processBranch(
   // universal value fact. Refuse to materialize PredicateBranch edge copies
   // from its condition — that suppresses edge-specific renaming in SCCP,
   // NewGVN, FunctionSpecialization, and any other PredicateInfo consumer.
-  if (soundspec::EnableSoundSpec && soundspec::isSafe(*BI)) {
+  // FIXME: Unconditionally bailing for now.
+  if (soundspec::EnableSoundSpec) {
     ++soundspecPredicateInfoBranchBails;
     return;
   }
@@ -467,7 +468,8 @@ void PredicateInfoBuilder::processSwitch(
     SmallVectorImpl<Value *> &OpsToRename) {
   // SoundSpec: a `!safe` switch is a per-edge safety attestation, not a
   // universal value fact. See processBranch for rationale.
-  if (soundspec::EnableSoundSpec && soundspec::isSafe(*SI)) {
+  // FIXME: Unconditionally bailing for now.
+  if (soundspec::EnableSoundSpec) {
     ++soundspecPredicateInfoSwitchBails;
     return;
   }

@@ -1059,7 +1059,8 @@ void llvm::computeKnownBitsFromContext(const Value *V, KnownBits &Known,
       // SoundSpec: a `!safe` branch's condition is a per-edge safety
       // attestation, not a universal value fact. Don't let its truth
       // refine the KnownBits of values that flow into unsafe primitives.
-      if (soundspec::EnableSoundSpec && soundspec::isSafe(*BI)) {
+      // FIXME: Unconditionally bailing for now.
+      if (soundspec::EnableSoundSpec) {
         ++soundspecKnownBitsFromContextBails;
         continue;
       }
@@ -9840,8 +9841,8 @@ getDomPredecessorCondition(const Instruction *ContextI) {
 
   // SoundSpec: a `!safe` branch is a per-edge safety attestation, not a
   // universal value fact. Refuse to imply downstream conditions from it.
-  if (soundspec::EnableSoundSpec &&
-      soundspec::isSafe(*PredBB->getTerminator())) {
+  // FIXME: Unconditionally bailing for now.
+  if (soundspec::EnableSoundSpec) {
     ++soundspecIsImpliedByDomConditionBails;
     return {nullptr, false};
   }
