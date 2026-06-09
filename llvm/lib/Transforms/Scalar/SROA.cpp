@@ -68,7 +68,6 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
-#include "llvm/IR/SoundSpec.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
@@ -119,20 +118,6 @@ STATISTIC(
     "Number of stores rewritten into predicated loads to allow promotion");
 STATISTIC(NumDeleted, "Number of instructions deleted");
 STATISTIC(NumVectorized, "Number of vectorized aggregates");
-
-// SoundSpec: counters for partition bails. In safe functions
-// (`!soundspec::isUnsafeFunction`) when `EnableSoundSpec` is set, we abort a
-// partition's SROA rewrite whenever any slice would need a load/store reshape
-// that loses per-op byte-coverage identity.
-STATISTIC(soundspecBlockNarrowStore,
-          "SoundSpec: bailed partition with a narrowing-extract store "
-          "(store wider than slice)");
-STATISTIC(soundspecBlockLoadWidenZExt,
-          "SoundSpec: bailed partition with a zext-past-end load "
-          "(load type wider than slice)");
-STATISTIC(soundspecBlockSplitLoad,
-          "SoundSpec: bailed partition with a split load "
-          "(single load straddles partition boundary)");
 
 namespace llvm {
 /// Disable running mem2reg during SROA in order to test or debug SROA.
@@ -3166,20 +3151,9 @@ public:
       }
     }
 
-    // SoundSpec: propagate `!safe` to the merged store only if every
-    // merged input store carried `!safe`. Any unsafe input poisons the
-    // whole combined write.
-    bool AllSafe = true;
-    for (const auto &Info : StoreInfos)
-      AllSafe &= Info.Store->getMetadata(LLVMContext::MD_safe) != nullptr;
-
     // Store the merged value into the alloca
     Value *MergedValue = VecElements.front();
-    StoreInst *MergedStore =
-        Builder.CreateAlignedStore(MergedValue, &NewAI, getSliceAlign());
-    if (AllSafe)
-      MergedStore->copyMetadata(*StoreInfos.front().Store,
-                                {LLVMContext::MD_safe});
+    Builder.CreateAlignedStore(MergedValue, &NewAI, getSliceAlign());
 
     IRBuilder<> LoadBuilder(TheLoad);
     TheLoad->replaceAllUsesWith(LoadBuilder.CreateAlignedLoad(
@@ -3303,7 +3277,6 @@ private:
 
     Type *TargetTy = IsSplit ? Type::getIntNTy(LI.getContext(), SliceSize * 8)
                              : LI.getType();
-
     bool IsPtrAdjusted = false;
     Value *V;
     if (VecTy) {
@@ -3412,10 +3385,6 @@ private:
     // Capture V for the purpose of debug-info accounting once it's converted
     // to a vector store.
     Value *OrigV = V;
-    // SoundSpec: V already matches VecTy ⇒ the new store will cover the same
-    // memory range as the original. The reshape branch below would otherwise
-    // load+insert+store, widening coverage to the whole NewAI.
-    bool SameCoverage = (V->getType() == VecTy);
     if (V->getType() != VecTy) {
       unsigned BeginIndex = getIndex(NewBeginOffset);
       unsigned EndIndex = getIndex(NewEndOffset);
@@ -3437,11 +3406,6 @@ private:
     StoreInst *Store = IRB.CreateAlignedStore(V, &NewAI, NewAI.getAlign());
     Store->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
                              LLVMContext::MD_access_group});
-    // SoundSpec: when coverage matches, the new store writes exactly the
-    // same bytes as the original. Value reshape via convertValue is fine —
-    // the user explicitly allowed it. Drop `!safe` if we widened.
-    if (SameCoverage)
-      Store->copyMetadata(SI, {LLVMContext::MD_safe});
     if (AATags)
       Store->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   V->getType(), DL));
@@ -3457,13 +3421,8 @@ private:
   bool rewriteIntegerStore(Value *V, StoreInst &SI, AAMDNodes AATags) {
     assert(IntTy && "We cannot extract an integer from the alloca");
     assert(!SI.isVolatile());
-    // SoundSpec: V's bit-width already matches IntTy ⇒ the new store covers
-    // exactly the original's bytes. The insertInteger branch below widens
-    // coverage to the whole NewAI.
-    bool SameCoverage =
-        DL.getTypeSizeInBits(V->getType()).getFixedValue() ==
-        IntTy->getBitWidth();
-    if (!SameCoverage) {
+    if (DL.getTypeSizeInBits(V->getType()).getFixedValue() !=
+        IntTy->getBitWidth()) {
       Value *Old = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
                                          NewAI.getAlign(), "oldload");
       Old = convertValue(DL, IRB, Old, IntTy);
@@ -3475,10 +3434,6 @@ private:
     StoreInst *Store = IRB.CreateAlignedStore(V, &NewAI, NewAI.getAlign());
     Store->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
                              LLVMContext::MD_access_group});
-    // SoundSpec: see rewriteVectorizedStoreInst — reshape is fine, widening
-    // isn't.
-    if (SameCoverage)
-      Store->copyMetadata(SI, {LLVMContext::MD_safe});
     if (AATags)
       Store->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   V->getType(), DL));
@@ -3507,11 +3462,6 @@ private:
         Pass.PostPromotionWorklist.insert(AI);
 
     TypeSize StoreSize = DL.getTypeStoreSize(V->getType());
-    // SoundSpec: track whether this rewrite preserves the original store's
-    // byte-coverage. Narrowing shrinks it to a subset; the rest of the
-    // rewriter (convertValue-only first branch, direct second branch) keeps
-    // coverage equal to V's storage size.
-    bool SameCoverage = true;
     if (StoreSize.isFixed() && SliceSize < StoreSize.getFixedValue()) {
       assert(!SI.isVolatile());
       assert(V->getType()->isIntegerTy() &&
@@ -3521,7 +3471,6 @@ private:
       IntegerType *NarrowTy = Type::getIntNTy(SI.getContext(), SliceSize * 8);
       V = extractInteger(DL, IRB, V, NarrowTy, NewBeginOffset - BeginOffset,
                          "extract");
-      SameCoverage = false;
     }
 
     if (VecTy)
@@ -3547,13 +3496,6 @@ private:
     }
     NewSI->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
                              LLVMContext::MD_access_group});
-    // SoundSpec: propagate `!safe` when this rewrite stores to the same
-    // byte-coverage as the original. The first-branch convertValue is a
-    // bit-preserving cast and the second-branch path leaves V unchanged,
-    // so both keep coverage = V's storage size. Only the narrowing path
-    // above shrinks coverage to a subset, and we drop `!safe` there.
-    if (SameCoverage)
-      NewSI->copyMetadata(SI, {LLVMContext::MD_safe});
     if (AATags)
       NewSI->setAAMetadata(AATags.adjustForAccess(NewBeginOffset - BeginOffset,
                                                   V->getType(), DL));
@@ -5369,68 +5311,6 @@ selectPartitionType(Partition &P, const DataLayout &DL, AllocaInst &AI,
   return {ArrayType::get(Type::getInt8Ty(C), P.size()), false, nullptr};
 }
 
-/// SoundSpec: detect whether the partition rewriter would have to reshape any
-/// load or store (split, widen-zext, or narrowing-extract). Per-slice bails
-/// inside `visit*` are unsafe because the rewriter commits to the new alloca
-/// after the first slice — a later `return false` would leave the partition's
-/// storage split across two allocas at runtime. Scanning here, before any IR
-/// mutation, lets us abort the partition cleanly. Only fires in safe
-/// functions; vector / integer-widening modes are already gated upstream by
-/// isVectorPromotionViable / isIntegerWideningViable.
-static bool soundspecPartitionNeedsBail(const Function &F, Partition &P,
-                                        Type *PartitionTy, VectorType *VecTy,
-                                        bool IsIntegerWideningViable,
-                                        const DataLayout &DL) {
-  if (!soundspec::EnableSoundSpec)
-    return false;
-  if (soundspec::isUnsafeFunction(F))
-    return false;
-  if (VecTy || IsIntegerWideningViable)
-    return false;
-
-  uint64_t PartBegin = P.beginOffset();
-  uint64_t PartEnd = P.endOffset();
-
-  auto WouldBail = [&](const Slice &S) {
-    Instruction *I = cast<Instruction>(S.getUse()->getUser());
-    bool IsSplit = S.beginOffset() < PartBegin || S.endOffset() > PartEnd;
-    uint64_t NewBegin = std::max<uint64_t>(S.beginOffset(), PartBegin);
-    uint64_t NewEnd = std::min<uint64_t>(S.endOffset(), PartEnd);
-    uint64_t SliceSize = NewEnd - NewBegin;
-
-    if (auto *LI = dyn_cast<LoadInst>(I)) {
-      if (IsSplit) {
-        ++soundspecBlockSplitLoad;
-        return true;
-      }
-      Type *TargetTy = LI->getType();
-      if (NewBegin == PartBegin && NewEnd == PartEnd &&
-          PartitionTy->isIntegerTy() && TargetTy->isIntegerTy() &&
-          DL.getTypeStoreSize(TargetTy).getFixedValue() > SliceSize &&
-          !LI->isVolatile()) {
-        ++soundspecBlockLoadWidenZExt;
-        return true;
-      }
-    } else if (auto *SI = dyn_cast<StoreInst>(I)) {
-      TypeSize StoreSize =
-          DL.getTypeStoreSize(SI->getValueOperand()->getType());
-      if (StoreSize.isFixed() && SliceSize < StoreSize.getFixedValue()) {
-        ++soundspecBlockNarrowStore;
-        return true;
-      }
-    }
-    return false;
-  };
-
-  for (Slice *S : P.splitSliceTails())
-    if (WouldBail(*S))
-      return true;
-  for (Slice &S : P)
-    if (WouldBail(S))
-      return true;
-  return false;
-}
-
 /// Rewrite an alloca partition's users.
 ///
 /// This routine drives both of the rewriting goals of the SROA pass. It tries
@@ -5447,10 +5327,6 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
   // Select the type for the new alloca that spans the partition.
   auto [PartitionTy, IsIntegerWideningViable, VecTy] =
       selectPartitionType(P, DL, AI, *C);
-
-  if (soundspecPartitionNeedsBail(*AI.getFunction(), P, PartitionTy, VecTy,
-                                  IsIntegerWideningViable, DL))
-    return nullptr;
 
   // Check for the case where we're going to rewrite to a new alloca of the
   // exact same type as the original, and with the same access offsets. In that

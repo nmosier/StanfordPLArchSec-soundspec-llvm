@@ -2963,29 +2963,31 @@ def int_protected_field_ptr :
 // Identity at runtime — value is unchanged. Semantically marks %val as a
 // taint source for SoundSpec's downstream analysis. Polymorphic over any type.
 //
-// Kept PURE (`IntrNoMem`: readnone, plus the default nounwind/willreturn).
-// Purity is required so the loop vectorizer accepts taint-carrying loops (see
-// llvm::isTriviallyVectorizable, where this intrinsic is registered) and widens
-// `taint.iN` -> `taint.<VF x iN>` instead of bailing on an unknown call.
-// Deliberately NOT `IntrSpeculatable`: a taint must not be hoisted/sunk onto a
-// control-flow path it wouldn't otherwise execute, so leaving it
-// non-speculatable keeps LICM / SimplifyCFG / generic speculation from moving
-// it across branches.
+// Modeled as SIDE-EFFECTING — writes inaccessible memory
+// (memory(inaccessiblemem: write)). This is deliberate: a taint is
+// control-dependent (two `taint(x)` on different paths are NOT interchangeable
+// even though they compute the same value), so it must not be merged, hoisted,
+// sunk, or speculated across branches. Impurity gets that from every generic
+// pass at once — EarlyCSE / GVN / LICM / SimplifyCFG all leave side-effecting
+// calls alone — with no per-pass guards. The inaccessible-memory location is a
+// fiction (no real memory is touched), chosen so the effect does NOT alias
+// normal loads/stores, leaving surrounding memory optimization (and SLP of the
+// loads it addresses) unaffected.
 //
-// Purity does make taint freely CSE-able — including ACROSS branches, which is
-// wrong: a taint is control-dependent, so two `taint(x)` on different paths are
-// not interchangeable even though they compute the same value. We therefore
-// forbid cross-block merging in the value-numbering passes (EarlyCSE, GVN,
-// NewGVN, GVNHoist) by keying their existing convergent-style "same basic block
-// only" guards on this intrinsic via `soundspec::isTaint` — WITHOUT marking it
-// `convergent`, which would re-block vectorization. Same-block (control-
-// equivalent) merging stays allowed.
+// Consequence: a side-effecting call isn't trivially vectorizable, so taint
+// blocks the loop vectorizer and taint-carrying loops are scalar-unrolled. We
+// recover SIMD by re-running InstCombine + SLP after the late LoopUnroll (see
+// PassBuilder::addVectorPasses): the InstCombine hoists/dedupes taints onto one
+// shared base (idempotency + same-block fold + GEP-hoist, in InstCombineCalls),
+// then SLP fuses the redundant unrolled load/compare/... chains.
 //
-// No `IntrNoDuplicate`. We also deliberately do NOT register an InstSimplify /
+// Same-block redundant taints are removed by InstCombine's intra-block fold
+// (control-equivalent, so erasing the side-effecting call is sound). No
+// `IntrNoDuplicate`. We also deliberately do NOT register an InstSimplify /
 // ConstantFolding handler, so `taint(C)` survives constant folding.
 def int_soundspec_taint :
   DefaultAttrsIntrinsic<[llvm_any_ty], [LLVMMatchType<0>],
-                        [IntrNoMem]>;
+                        [IntrInaccessibleMemOnly, IntrWriteMem]>;
 
 // llvm.soundspec.delay_if_zero(<ty> %val) -> <ty>
 //
