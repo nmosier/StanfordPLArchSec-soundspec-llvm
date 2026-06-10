@@ -413,6 +413,11 @@ void X86InstPrinterCommon::printInstFlags(const MCInst *MI, raw_ostream &O,
   if (Flags & X86::IP_HAS_UNSAFE)
     O << "\tunsafe\t";
 
+  // SoundSpec: the 0x2E prefix (legacy CS, repurposed) marks a tainted
+  // instruction. Render it as a `taint` prefix.
+  if (Flags & X86::IP_HAS_TAINT)
+    O << "\ttaint\t";
+
   if (TSFlags & X86II::EVEX_NF && !X86::isCFCMOVCC(MI->getOpcode()))
     O << "\t{nf}";
 

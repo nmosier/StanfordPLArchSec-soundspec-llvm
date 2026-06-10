@@ -7,6 +7,7 @@ namespace llvm {
 class Instruction;
 class Function;
 class Value;
+class StoreInst;
 
 namespace soundspec {
 

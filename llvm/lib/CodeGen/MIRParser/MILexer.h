@@ -80,6 +80,7 @@ struct MIToken {
     kw_samesign,
     kw_inbounds,
     kw_safe,
+    kw_taint,
     kw_debug_location,
     kw_debug_instr_number,
     kw_dbg_instr_ref,

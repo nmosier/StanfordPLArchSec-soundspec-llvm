@@ -23,6 +23,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/MemoryModelRelaxationAnnotations.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Value.h"
@@ -241,7 +242,8 @@ Intrinsic::ID llvm::getVectorIntrinsicIDForCall(const CallInst *CI,
   if (isTriviallyVectorizable(ID) || ID == Intrinsic::lifetime_start ||
       ID == Intrinsic::lifetime_end || ID == Intrinsic::assume ||
       ID == Intrinsic::experimental_noalias_scope_decl ||
-      ID == Intrinsic::sideeffect || ID == Intrinsic::pseudoprobe)
+      ID == Intrinsic::sideeffect || ID == Intrinsic::pseudoprobe ||
+      ID == Intrinsic::soundspec_taint)
     return ID;
   return Intrinsic::not_intrinsic;
 }

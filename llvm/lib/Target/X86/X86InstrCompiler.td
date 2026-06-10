@@ -315,19 +315,33 @@ def SOUNDSPEC_CFI_SRC : PseudoI<
   let AsmString = "soundspec_cfi_src\t$id";
 }
 
-// SoundSpec UNSAFE_POST marker — encoded as `0F 19 C0` (TB-prefixed opcode
-// 0x19 with fixed ModR/M = 0xC0, i.e. mod=11/reg=000/r/m=000). Sits in the
-// `0F 19` reserved no-op space, where mod=11 forms are #UD on stock x86.
-// No inputs or outputs; carries hasSideEffects so MIR passes don't drop,
-// CSE, or reorder it.
-let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in {
-  def UNSAFE_POST : I<0x19, MRM_C0, (outs), (ins), "unsafe_post", []>, TB,
-                    Sched<[]>;
+// SoundSpec RDTAINT — encoded as `0F 19 /0 <reg>` (TB-prefixed opcode 0x19,
+// ModR/M with mod=11/reg=000/rm=<dst>, the MRM0r form). Reuses the `0F 19`
+// reserved no-op space formerly held by UNSAFE_POST, which used the fixed
+// `0F 19 C0` (MRM_C0) sub-form; RDTAINT generalizes that slot so the dest
+// register is encoded in the r/m field. mod=11 forms here are #UD on stock
+// x86. No source operands — RDTAINT reads the live SoundSpec taint state into
+// the destination register. RDTAINT32r / RDTAINT64r (REX.W) are selected by
+// the destination register class.
+//
+// hasSideEffects = 1: like UNSAFE_POST before it, the architectural value is
+// not a pure function of the inputs (there are none) — each RDTAINT observes
+// the taint state at its own program point — so it must survive DCE and must
+// not be CSE'd, reordered, hoisted, or duplicated. mayStore = 1 mirrors TAINT:
+// `int_soundspec_rdtaint` writes inaccessible memory, so its selection pattern
+// requires the selecting instruction to be a may-store (TableGen otherwise
+// reports "Pattern doesn't match mayStore = 0").
+let hasSideEffects = 1, mayLoad = 0, mayStore = 1 in {
+  def RDTAINT32r : I<0x19, MRM0r, (outs GR32:$dst), (ins), "rdtaint{l}\t$dst",
+                     [(set GR32:$dst, (int_soundspec_rdtaint))]>, TB, Sched<[]>;
+  def RDTAINT64r : RI<0x19, MRM0r, (outs GR64:$dst), (ins), "rdtaint{q}\t$dst",
+                      [(set GR64:$dst, (int_soundspec_rdtaint))]>, TB,
+                      Sched<[]>;
 }
 
 // SoundSpec TAINT — encoded as `0F 19 /1 <reg>` (TB-prefixed opcode 0x19,
 // ModR/M with mod=11/reg=001/rm=<reg>). Same `0F 19` reserved no-op space
-// as UNSAFE_POST, different /reg subop. Identity at runtime; semantically
+// as RDTAINT, different /reg subop. Identity at runtime; semantically
 // marks the operand register as a SoundSpec taint source. The `$src = $dst`
 // tie reflects the single-register encoding — the instruction reads and
 // writes the same architectural register.
@@ -374,7 +388,7 @@ let mayLoad = 0, mayStore = 1,
 // SoundSpec DELAY — encoded as `0F 1D /r` with ModR/M mod=11/reg=ddd/rm=sss
 // (MRMSrcReg form): `delay Rd, Rs` where Rd is in modrm.reg and Rs in
 // modrm.r/m. Sits in the `0F 1D` reserved no-op slot, distinct from `0F 19`
-// (UNSAFE_POST / TAINT GPR) and `0F 1C` (TAINT128r).
+// (RDTAINT / TAINT GPR) and `0F 1C` (TAINT128r).
 //
 // $dst is both input and output (tied to $src1); $src2 is a pure source. No
 // hasSideEffects — like TAINT, the architectural value is identity at

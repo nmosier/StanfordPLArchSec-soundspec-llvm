@@ -862,6 +862,8 @@ static void printMI(raw_ostream &OS, MFPrintState &State,
     OS << "inbounds ";
   if (MI.getFlag(MachineInstr::Safe))
     OS << "safe ";
+  if (MI.getFlag(MachineInstr::Taint))
+    OS << "taint ";
 
   // NOTE: Please add new MIFlags also to the MI_FLAGS_STR in
   // llvm/utils/update_mir_test_checks.py.

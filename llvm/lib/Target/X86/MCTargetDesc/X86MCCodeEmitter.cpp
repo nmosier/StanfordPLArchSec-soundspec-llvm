@@ -909,6 +909,10 @@ PrefixKind X86MCCodeEmitter::emitPrefixImpl(unsigned &CurOp, const MCInst &MI,
   // the head of the prefix stream so a SoundSpec-aware decoder sees it first.
   if (Flags & X86::IP_HAS_UNSAFE)
     emitByte(0x36, CB);
+  // SoundSpec: emit the TAINT prefix (0x2E — legacy CS, repurposed) on any
+  // instruction tagged with IP_HAS_TAINT.
+  if (Flags & X86::IP_HAS_TAINT)
+    emitByte(0x2E, CB);
   if (TSFlags & X86II::REP || Flags & X86::IP_HAS_REPEAT)
     emitByte(0xF3, CB);
   if (Flags & X86::IP_HAS_REPEAT_NE)

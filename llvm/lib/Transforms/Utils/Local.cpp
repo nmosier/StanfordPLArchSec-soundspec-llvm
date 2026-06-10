@@ -413,6 +413,7 @@ bool llvm::wouldInstructionBeTriviallyDeadOnUnusedPaths(
   if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(I))
     if (II->getIntrinsicID() == Intrinsic::stacksave ||
         II->getIntrinsicID() == Intrinsic::launder_invariant_group ||
+        II->getIntrinsicID() == Intrinsic::soundspec_taint ||
         II->isLifetimeStartOrEnd())
       return false;
   return wouldInstructionBeTriviallyDead(I, TLI);
@@ -472,6 +473,12 @@ bool llvm::wouldInstructionBeTriviallyDead(const Instruction *I,
     // Safe to delete llvm.stacksave and launder.invariant.group if dead.
     if (II->getIntrinsicID() == Intrinsic::stacksave ||
         II->getIntrinsicID() == Intrinsic::launder_invariant_group)
+      return true;
+
+    // SoundSpec taint declares side effects to prevent it from being moved or
+    // merged across branches, but a taint whose result is unused protects
+    // nothing and is a runtime nop -- safe to delete when dead.
+    if (II->getIntrinsicID() == Intrinsic::soundspec_taint)
       return true;
 
     // Intrinsics declare sideeffects to prevent them from moving, but they are
@@ -2977,6 +2984,28 @@ static void combineMetadata(Instruction *K, const Instruction *J,
         break;
       case LLVMContext::MD_invariant_group:
         // Preserve !invariant.group in K.
+        break;
+      case LLVMContext::MD_soundspec_public:
+        // SoundSpec: !soundspec.public marks an access/taint whose address is
+        // public, so it needs less protection. When CSE/GVN merges two ops
+        // into K, keep the marker only if BOTH were public (intersection) —
+        // otherwise K stands in for a possibly-secret access and must retain
+        // full protection. Dropping the marker is always the safe direction;
+        // keeping it when J isn't public would be an under-protection bug. For
+        // AA-only combining (K is merely relocating, not absorbing J's value),
+        // preserve K's own marker.
+        if (!AAOnly && !JMD)
+          K->setMetadata(Kind, nullptr);
+        break;
+      case LLVMContext::MD_soundspec_comment:
+        // SoundSpec: !soundspec.comment is human-readable provenance, not a
+        // correctness property. Preserve it across a CSE merge unless the two
+        // ops carry *different* comments (a conflict we can't attribute to one
+        // source) — then drop it. A missing comment on J is not a conflict, so
+        // K keeps its own. For AA-only combining (K is merely relocating past
+        // an unrelated J), always keep K's comment.
+        if (!AAOnly && JMD && JMD != KMD)
+          K->setMetadata(Kind, nullptr);
         break;
       // Keep empty cases for prof, mmra, memprof, and callsite to prevent them
       // from being removed as unknown metadata. The actual merging is handled

@@ -1499,7 +1499,8 @@ bool MIParser::parseInstruction(unsigned &OpCode, unsigned &Flags) {
          Token.is(MIToken::kw_nusw) ||
          Token.is(MIToken::kw_samesign) ||
          Token.is(MIToken::kw_inbounds) ||
-         Token.is(MIToken::kw_safe)) {
+         Token.is(MIToken::kw_safe) ||
+         Token.is(MIToken::kw_taint)) {
     // clang-format on
     // Mine frame and fast math flags
     if (Token.is(MIToken::kw_frame_setup))
@@ -1544,6 +1545,8 @@ bool MIParser::parseInstruction(unsigned &OpCode, unsigned &Flags) {
       Flags |= MachineInstr::InBounds;
     if (Token.is(MIToken::kw_safe))
       Flags |= MachineInstr::Safe;
+    if (Token.is(MIToken::kw_taint))
+      Flags |= MachineInstr::Taint;
 
     lex();
   }

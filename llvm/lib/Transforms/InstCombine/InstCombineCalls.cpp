@@ -1861,6 +1861,43 @@ static Instruction *foldNeonShift(IntrinsicInst *II, InstCombinerImpl &IC) {
   return IC.replaceInstUsesWith(*II, Result);
 }
 
+/// SoundSpec: is there a same-block, straight-line (no PHI, no cross-block)
+/// data path from \p Start — through GEP address arithmetic — back to a
+/// `@llvm.soundspec.taint`? If so, a taint of \p Start is redundant: taint
+/// propagates along the address-dependence chain, so it is already dynamically
+/// present whenever the block executes. Stays strictly within \p BB so it never
+/// reasons across a control edge.
+static bool hasIntraBlockTaintedProducer(Value *Start, const BasicBlock *BB) {
+  using namespace llvm::PatternMatch;
+
+  // Degenerate self-loop blocks (unreachable from entry — sole predecessor is
+  // themselves) can have cyclic same-block operand graphs, which breaks the
+  // "producer dominates the use" reasoning the fold relies on. Bail on them.
+  if (const BasicBlock *Pred = BB->getUniquePredecessor(); Pred && Pred == BB)
+    return false;
+
+  SmallPtrSet<Value *, 8> Visited;
+  SmallVector<Value *, 8> Worklist;
+  Worklist.push_back(Start);
+  while (!Worklist.empty()) {
+    auto *Op = dyn_cast<Instruction>(Worklist.pop_back_val());
+    // Stay in-block and never follow a PHI — those are the only same-block
+    // values that carry data across an edge.
+    if (!Op || Op->getParent() != BB || isa<PHINode>(Op))
+      continue;
+    if (!Visited.insert(Op).second)
+      continue;
+    if (match(Op, m_Intrinsic<Intrinsic::soundspec_taint>()))
+      return true;
+    // Taint propagates through GEP address arithmetic (base and indices);
+    // follow only GEPs so we never leave the address-dependence chain.
+    if (isa<GetElementPtrInst>(Op))
+      for (Value *V : Op->operands())
+        Worklist.push_back(V);
+  }
+  return false;
+}
+
 /// CallInst simplification. This mostly only handles folding of intrinsic
 /// instructions. For normal calls, it allows visitCallBase to do the heavy
 /// lifting.
@@ -2452,6 +2489,13 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
   case Intrinsic::soundspec_taint: {
     using namespace llvm::PatternMatch;
 
+    // A taint whose result is never consumed protects nothing, so the
+    // side-effecting marker can be removed (sanctioned by the intrinsic's
+    // contract — see Intrinsics.td). This reaps the dead taints left behind
+    // when visitLoadInst / visitStoreInst hoist a taint off an address.
+    if (II->use_empty())
+      return eraseInstFromFunction(*II);
+
     Value *Arg = II->getArgOperand(0);
 
     // taint(taint(a)) -> taint(a)
@@ -2459,13 +2503,33 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
     if (match(Arg, m_Intrinsic<Intrinsic::soundspec_taint>(m_Value(InnerOp))))
       return replaceOperand(*II, 0, InnerOp);
 
-    // intra-block:
-    // b = taint(a)
-    // ...
-    // c = taint(a)
-    // replace all with b.
-    // TODO
-    
+    // intra-block idempotency: a taint(x) preceded in the SAME block by an
+    // earlier taint(x) is redundant. Same value, and same-block => the two are
+    // control-equivalent, so the earlier taint subsumes this one. Forward the
+    // value and drop this (side-effecting) taint — sound precisely because it's
+    // an idempotent taint at a control-equivalent point, which generic DCE/CSE
+    // cannot infer for a memory-writing call.
+    for (Instruction *Prev = II->getPrevNode(); Prev; Prev = Prev->getPrevNode())
+      if (auto *PrevII = dyn_cast<IntrinsicInst>(Prev);
+          PrevII && PrevII->getIntrinsicID() == Intrinsic::soundspec_taint &&
+          PrevII->getArgOperand(0) == Arg) {
+        replaceInstUsesWith(*II, PrevII);
+        return eraseInstFromFunction(*II);
+      }
+
+    // taint(P) is redundant when P already carries taint along a same-block
+    // GEP address-dependence chain: taint propagates through the address
+    // arithmetic, so it is dynamically present whenever this block runs. Keep
+    // the inner taint and drop this one. (Ported from SoundSpecPreprocess.)
+    if (hasIntraBlockTaintedProducer(Arg, II->getParent())) {
+      replaceInstUsesWith(*II, Arg);
+      return eraseInstFromFunction(*II);
+    }
+
+    // Disabling this for now.
+#if 0
+    // [soundspec] Disabling this for now. It might actually break our ability
+    // to do loop vectorization.
     // Hoist taint above a constant-offset GEP that feeds only this taint:
     //   taint(getelementptr %x, <const...>)
     //     -> getelementptr (taint %x), <const...>
@@ -2498,6 +2562,7 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
       NewGEP->takeName(GEP);
       return NewGEP;
     }
+#endif
     break;
   }
   case Intrinsic::powi:

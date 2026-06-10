@@ -704,6 +704,10 @@ struct InternalInstruction {
   // UNSAFE prefix was present. Recorded separately from segmentOverride so the
   // printer renders it as an `unsafe` prefix rather than an `%ss:` override.
   bool hasUnsafePrefix;
+  // SoundSpec: the 0x2e byte (legacy CS segment override) repurposed as the
+  // TAINT prefix was present. Recorded separately from segmentOverride so the
+  // printer renders it as a `taint` prefix rather than an `%cs:` override.
+  bool hasTaintPrefix;
   // 1 if the prefix byte, 0xf2 or 0xf3 is xacquire or xrelease
   bool xAcquireRelease;
 

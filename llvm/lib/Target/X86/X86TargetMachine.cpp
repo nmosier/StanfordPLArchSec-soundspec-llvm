@@ -85,6 +85,7 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   initializeX86LowerAMXIntrinsicsLegacyPassPass(PR);
   initializeX86LowerAMXTypeLegacyPassPass(PR);
   initializeX86LowerSoundSpecIntrinsicsLegacyPassPass(PR);
+  initializeX86SoundSpecCombinePass(PR);
   initializeX86PreTileConfigLegacyPass(PR);
   initializeGlobalISel(PR);
   initializeWinEHStatePassPass(PR);
@@ -99,7 +100,6 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   initializeX86FastPreTileConfigLegacyPass(PR);
   initializeX86FastTileConfigLegacyPass(PR);
   initializeKCFIPass(PR);
-  initializeX86SoundSpecCFIPass(PR);
   initializeX86LowerTileCopyLegacyPass(PR);
   initializeX86ExpandPseudoLegacyPass(PR);
   initializeX86ExecutionDomainFixPass(PR);
@@ -582,7 +582,6 @@ void X86PassConfig::addPostRegAlloc() {
 void X86PassConfig::addPreSched2() {
   addPass(createX86ExpandPseudoLegacyPass());
   addPass(createKCFIPass());
-  addPass(createX86SoundSpecCFIPass());
 }
 
 void X86PassConfig::addPreEmitPass() {
@@ -664,6 +663,11 @@ void X86PassConfig::addPreEmitPass2() {
   // after all real instructions have been added to the epilog.
   if (TT.isOSWindows() && TT.isX86_64())
     addPass(createX86WinEHUnwindV2Pass());
+
+  // SoundSpec: basic instruction combining of SoundSpec markers, scheduled last
+  // so it sees the final instruction stream right before emission. No-op unless
+  // SoundSpec is enabled.
+  addPass(createX86SoundSpecCombinePass());
 }
 
 bool X86PassConfig::addPostFastRegAllocRewrite() {

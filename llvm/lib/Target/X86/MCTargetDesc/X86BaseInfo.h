@@ -67,6 +67,9 @@ enum IPREFIXES {
   // SoundSpec: emit a 0x36 (legacy SS, repurposed as UNSAFE) prefix before
   // any speculation primitive whose source MI lacked `MIFlag::Safe`.
   IP_HAS_UNSAFE = 1U << 14,
+  // SoundSpec: emit a 0x2E (legacy CS, repurposed as TAINT) prefix on any
+  // instruction whose source MI carried `MIFlag::Taint`.
+  IP_HAS_TAINT = 1U << 15,
 };
 
 enum OperandType : unsigned {

@@ -419,6 +419,12 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
       X86::soundspec::maybeSpeculationPrimitive(*MI))
     OutMI.setFlags(OutMI.getFlags() | X86::IP_HAS_UNSAFE);
 
+  // SoundSpec: tag the MCInst when the source MI carries the Taint flag (set by
+  // the late X86SoundSpecCombine pass). Encoded as IP_HAS_TAINT in
+  // MCInst::Flags; X86MCCodeEmitter emits a 0x2E (legacy CS, repurposed) prefix.
+  if (soundspec::EnableSoundSpec && MI->getFlag(MachineInstr::MIFlag::Taint))
+    OutMI.setFlags(OutMI.getFlags() | X86::IP_HAS_TAINT);
+
   bool In64BitMode = AsmPrinter.getSubtarget().is64Bit();
   if (X86::optimizeInstFromVEX3ToVEX2(OutMI, MI->getDesc()) ||
       X86::optimizeShiftRotateWithImmediateOne(OutMI) ||

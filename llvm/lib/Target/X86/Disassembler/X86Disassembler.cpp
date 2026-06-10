@@ -294,8 +294,12 @@ static int readPrefixes(struct InternalInstruction *insn) {
       insn->repeatPrefix = byte;
       break;
     }
-    case 0x2e: // CS segment override -OR- Branch not taken
-      insn->segmentOverride = SEG_OVERRIDE_CS;
+    case 0x2e: // CS segment override -OR- Branch not taken -OR- SoundSpec TAINT
+      // SoundSpec: 0x2e (legacy CS segment override) is repurposed as the
+      // TAINT prefix marking an instruction whose result register is tainted.
+      // Record it as the TAINT prefix rather than a CS segment override so the
+      // printer renders `taint` instead of `%cs:`/`cs`.
+      insn->hasTaintPrefix = true;
       break;
     case 0x36: // SS segment override -OR- SoundSpec UNSAFE prefix
       // SoundSpec: 0x36 (legacy SS segment override) is repurposed as the
@@ -1924,6 +1928,10 @@ MCDisassembler::DecodeStatus X86GenericDisassembler::getInstruction(
     // render it as an `unsafe` prefix token.
     if (Insn.hasUnsafePrefix)
       Flags |= X86::IP_HAS_UNSAFE;
+    // SoundSpec: recover the repurposed 0x2e TAINT prefix so the printer can
+    // render it as a `taint` prefix token.
+    if (Insn.hasTaintPrefix)
+      Flags |= X86::IP_HAS_TAINT;
     if (!Insn.mandatoryPrefix) {
       if (Insn.hasOpSize)
         Flags |= X86::IP_HAS_OP_SIZE;

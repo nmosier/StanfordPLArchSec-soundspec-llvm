@@ -3000,6 +3000,23 @@ def int_soundspec_delay_if_zero :
   DefaultAttrsIntrinsic<[llvm_any_ty], [LLVMMatchType<0>],
                         [IntrNoMem, IntrSpeculatable]>;
 
+// llvm.soundspec.rdtaint() -> <ty>
+//
+// Reads the live SoundSpec taint state into a fresh value. Takes no
+// arguments; the result type is overloaded, so the name is mangled by the
+// return type (e.g. @llvm.soundspec.rdtaint.i64). Lowers to `RDTAINT Rd`
+// (`0F 19 /0`), an identity-at-runtime marker selected for i32 / i64.
+//
+// Modeled as SIDE-EFFECTING — writes inaccessible memory, exactly as
+// int_soundspec_taint, and for the same reason: every rdtaint() is
+// syntactically identical (no args), so without impurity EarlyCSE / GVN /
+// LICM would coalesce reads taken at different program points into one. The
+// inaccessible-memory effect is a fiction that does not alias real
+// loads/stores, leaving surrounding memory optimization untouched.
+def int_soundspec_rdtaint :
+  DefaultAttrsIntrinsic<[llvm_any_ty], [],
+                        [IntrInaccessibleMemOnly, IntrWriteMem]>;
+
 //===----------------------------------------------------------------------===//
 // Target-specific intrinsics
 //===----------------------------------------------------------------------===//

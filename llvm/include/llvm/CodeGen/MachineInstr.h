@@ -126,12 +126,15 @@ public:
     InBounds = 1 << 22,      // Pointer arithmetic remains inbounds.
                              // Implies NoUSWrap.
     LRSplit = 1 << 23,       // Instruction for live range split.
-    Safe = 1 << 24           // SoundSpec: speculation primitive
+    Safe = 1 << 24,          // SoundSpec: speculation primitive
                              // (conditional/indirect branch, indirect call,
                              // or store) marked as safe; absence of this
                              // flag on a speculation primitive means it
                              // needs SoundSpec protection. Sourced from
                              // IR `!safe` metadata via SelectionDAGBuilder.
+    Taint = 1 << 25          // SoundSpec: instruction is a taint source —
+                             // its destination register is tainted. Set by
+                             // SoundSpec passes; not sourced from IR metadata.
   };
 
 private:
@@ -142,7 +145,7 @@ private:
   MachineOperand *Operands = nullptr;   // Pointer to the first operand.
 
 #define LLVM_MI_NUMOPERANDS_BITS 24
-#define LLVM_MI_FLAGS_BITS 25
+#define LLVM_MI_FLAGS_BITS 26
 #define LLVM_MI_ASMPRINTERFLAGS_BITS 8
 
   /// Number of operands on instruction.

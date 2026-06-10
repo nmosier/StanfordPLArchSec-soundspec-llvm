@@ -6461,11 +6461,15 @@ static Value *simplifyUnaryIntrinsic(Function *F, Value *Op0,
   Value *X;
   switch (IID) {
   case Intrinsic::soundspec_delay_if_zero:
-    // delay_if_zero(x) stalls iff x is zero. If x is provably non-zero,
-    // the dynamic stall can never fire and the intrinsic is identity.
-    // Picks up `nonnull` attributes, `dereferenceable`, prior icmp facts,
-    // KnownBits, etc. via isKnownNonZero.
-    if (isKnownNonZero(Op0, Q))
+    // delay_if_zero(x) stalls iff x is zero. If x is provably non-zero, the
+    // dynamic stall can never fire and the intrinsic is identity. isKnownNonZero
+    // analyzes the *value's* definition (dereferenceable, icmp facts, KnownBits,
+    // assumptions, ...) but does NOT consult this call's own argument
+    // attributes — so a `nonnull` that was deduced for the operand and parked on
+    // the call argument is missed. Check it explicitly.
+    if (isKnownNonZero(Op0, Q) ||
+        (Call && Op0->getType()->isPointerTy() &&
+         Call->paramHasAttr(0, Attribute::NonNull)))
       return Op0;
     break;
   case Intrinsic::fabs:

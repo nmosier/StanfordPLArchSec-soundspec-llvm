@@ -1084,8 +1084,51 @@ Value *InstCombinerImpl::simplifyNonNullOperand(Value *V,
   return nullptr;
 }
 
+/// SoundSpec: if \p Ptr (the pointer operand of access \p I) is a
+/// control-equivalent public `@llvm.soundspec.taint(base)` — i.e. it carries
+/// the `!soundspec.public` marker and sits in the same block as \p I — return
+/// \p base; otherwise null. Lets the caller hoist the taint off the address
+/// and onto the accessed value.
+static Value *getPublicTaintedBase(Value *Ptr, const Instruction &I) {
+  Value *Base;
+  if (!match(Ptr, m_Intrinsic<Intrinsic::soundspec_taint>(m_Value(Base))))
+    return nullptr;
+  auto *Taint = cast<Instruction>(Ptr);
+  // The `soundspec_taint_public` marker lives on the taint call itself (not on
+  // the consuming load/store), and the taint must be control-equivalent to the
+  // access for hoisting it to be sound — require the same block.
+  if (!Taint->getMetadata(LLVMContext::MD_soundspec_public) ||
+      Taint->getParent() != I.getParent())
+    return nullptr;
+  return Base;
+}
+
 Instruction *InstCombinerImpl::visitLoadInst(LoadInst &LI) {
   Value *Op = LI.getOperand(0);
+
+  // SoundSpec: hoist a control-equivalent public taint off the loaded address
+  // and onto the loaded value: load(taint(p)) => taint(load(p)). Preserves the
+  // public-pointer marker's data-dependence while exposing the plain load to
+  // memory optimization. (Ported from SoundSpecPreprocess so it runs wherever
+  // InstCombine runs.)
+  if (Value *Base = getPublicTaintedBase(Op, LI)) {
+    InstCombiner::BuilderTy::InsertPointGuard Guard(Builder);
+    Builder.SetInsertPoint(LI.getNextNode());
+    CallInst *Taint =
+        Builder.CreateUnaryIntrinsic(Intrinsic::soundspec_taint, &LI);
+    // Carry the SoundSpec provenance comment from the original address taint
+    // onto the new value taint so it isn't lost in the rewrite. (!soundspec.public
+    // is deliberately not copied — it describes the pointer, not the value.)
+    if (MDNode *C = cast<Instruction>(Op)->getMetadata(
+            LLVMContext::MD_soundspec_comment))
+      Taint->setMetadata(LLVMContext::MD_soundspec_comment, C);
+    replaceInstUsesWith(LI, Taint);
+    // replaceInstUsesWith just rewrote Taint's own argument (a use of LI) to
+    // Taint; restore it so Taint wraps the load result, not itself.
+    Taint->setArgOperand(0, &LI);
+    return replaceOperand(LI, 0, Base);
+  }
+
   if (Value *Res = simplifyLoadInst(&LI, Op, SQ.getWithInstruction(&LI)))
     return replaceInstUsesWith(LI, Res);
 
@@ -1418,6 +1461,19 @@ static bool equivalentAddressValues(Value *A, Value *B) {
 Instruction *InstCombinerImpl::visitStoreInst(StoreInst &SI) {
   Value *Val = SI.getOperand(0);
   Value *Ptr = SI.getOperand(1);
+
+  // SoundSpec: hoist a control-equivalent public taint off the stored address
+  // and onto the stored value: store(v, taint(p)) => store(taint(v), p).
+  if (Value *Base = getPublicTaintedBase(Ptr, SI)) {
+    auto *TaintedVal =
+        Builder.CreateUnaryIntrinsic(Intrinsic::soundspec_taint, Val);
+    // Carry the SoundSpec provenance comment from the original address taint.
+    if (MDNode *C = cast<Instruction>(Ptr)->getMetadata(
+            LLVMContext::MD_soundspec_comment))
+      TaintedVal->setMetadata(LLVMContext::MD_soundspec_comment, C);
+    replaceOperand(SI, 0, TaintedVal);
+    return replaceOperand(SI, 1, Base);
+  }
 
   // Try to canonicalize the stored type.
   if (combineStoreToValueType(*this, SI))

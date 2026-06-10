@@ -33,12 +33,14 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsX86.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
@@ -51,6 +53,8 @@ void initializeX86LowerSoundSpecIntrinsicsLegacyPassPass(PassRegistry &);
 }
 
 namespace {
+
+constexpr unsigned TaintAddrSpace = 259; // From X86.h
 
 class X86LowerSoundSpecIntrinsicsLegacyPass : public FunctionPass {
 public:
@@ -84,8 +88,80 @@ static cl::opt<bool> StripTaint(DEBUG_TYPE "-strip", cl::init(false),
                                 cl::Hidden);
 static cl::opt<bool> InsertChecks(DEBUG_TYPE "-check", cl::init(false), cl::Hidden);
 
-static Value *CreateTaint(IRBuilderBase &IRB, Value *Op) {
-  return IRB.CreateUnaryIntrinsic(Intrinsic::soundspec_taint, Op);
+static Value *CreateTaint(IRBuilderBase &IRB, Value *Op,
+                          const Instruction *Src = nullptr) {
+  auto *T = IRB.CreateUnaryIntrinsic(Intrinsic::soundspec_taint, Op);
+  // Inherit the SoundSpec provenance comment from the taint being lowered so
+  // decomposed sub-taints aren't left comment-less.
+  if (Src)
+    if (MDNode *C = Src->getMetadata(LLVMContext::MD_soundspec_comment))
+      T->setMetadata(LLVMContext::MD_soundspec_comment, C);
+  return T;
+}
+
+// Taint a non-pointer, non-aggregate scalar/vector value (FP scalar, integer
+// vector, ...) by bitcasting the whole thing to a same-width integer, tainting
+// that GPR-class scalar (matches TAINT32r / TAINT64r), and bitcasting back.
+// Sub-32-bit widths get a zext/trunc round trip to reach i32. `Bits` must be in
+// (0, 64] and `T` must be bitcast-compatible with i`Bits`.
+static Value *taintViaIntBitcast(IRBuilderBase &IRB, Value *Op, Type *T,
+                                 unsigned Bits, const Instruction *Src) {
+  auto *IntTy = IRB.getIntNTy(Bits);
+  Value *V = IRB.CreateBitCast(Op, IntTy);
+  if (Bits < 32) {
+    V = IRB.CreateZExt(V, IRB.getInt32Ty());
+    V = CreateTaint(IRB, V, Src);
+    V = IRB.CreateTrunc(V, IntTy);
+  } else {
+    V = CreateTaint(IRB, V, Src);
+  }
+  return IRB.CreateBitCast(V, T);
+}
+
+static bool rewriteLoadTaintOut(LoadInst *LI) {
+  using namespace llvm::PatternMatch;
+
+  // Only rewrite loads with a single use, which is a taint.
+  if (!LI->hasOneUser())
+    return false;
+
+  // Is the single consumer taint(LI)?
+  User *Consumer = *LI->user_begin();
+  if (!match(Consumer, m_Intrinsic<Intrinsic::soundspec_taint>()))
+    return false;
+
+  // Rewrite the load's pointer with an addrspacecast.
+  IRBuilder<> IRB(LI);
+  auto *Ptr = IRB.CreateAddrSpaceCast(LI->getPointerOperand(),
+                                      IRB.getPtrTy(TaintAddrSpace));
+  LI->setOperand(LI->getPointerOperandIndex(), Ptr);
+
+  // Make the consumer dead. Delete later, though.
+  Consumer->replaceAllUsesWith(LI);
+
+  return true;
+}
+
+static bool rewriteStoreTaintOut(StoreInst *SI) {
+  using namespace llvm::PatternMatch;
+
+  // Is the data operand a taint?
+  auto *TaintedData = SI->getValueOperand();
+  Value *WrappedData;
+  if (!match(TaintedData,
+             m_Intrinsic<Intrinsic::soundspec_taint>(m_Value(WrappedData))))
+    return false;
+
+  // Rewrite the store's pointer with an addrspacecast.
+  IRBuilder<> IRB(SI);
+  auto *Ptr = IRB.CreateAddrSpaceCast(SI->getPointerOperand(),
+                                      IRB.getPtrTy(TaintAddrSpace));
+  SI->setOperand(SI->getPointerOperandIndex(), Ptr);
+
+  // Remove the tainted data wrap.
+  SI->setOperand(0, WrappedData);
+
+  return true;
 }
 
 static Value *rewriteTaintInst(Instruction &I, Value *Op) {
@@ -109,10 +185,19 @@ static Value *rewriteTaintInst(Instruction &I, Value *Op) {
     if (N < 32) {
       // ZExt + Trunc.
       Op = IRB.CreateZExt(Op, IRB.getInt32Ty());
-      Op = CreateTaint(IRB, Op);
+      Op = CreateTaint(IRB, Op, &I);
       Op = IRB.CreateTrunc(Op, T);
       return Op;
     }
+  }
+
+  // Handle scalar floating-point (half/bfloat=16, float=32, double=64): bitcast
+  // to a same-width integer, taint, bitcast back. fp128 / x86_fp80 (> 64 bits)
+  // fall through to the LFENCE fallback.
+  if (T->isFloatingPointTy()) {
+    unsigned Bits = T->getPrimitiveSizeInBits().getFixedValue();
+    if (Bits != 0 && Bits <= 64)
+      return taintViaIntBitcast(IRB, Op, T, Bits, &I);
   }
 
   // Handle aggregate types (structs and arrays).
@@ -127,7 +212,7 @@ static Value *rewriteTaintInst(Instruction &I, Value *Op) {
     }
     for (unsigned Idx = 0; Idx < NumElts; ++Idx) {
       Value *V = IRB.CreateExtractValue(Op, {Idx});
-      V = CreateTaint(IRB, V);
+      V = CreateTaint(IRB, V, &I);
       NewOp = IRB.CreateInsertValue(NewOp, V, {Idx});
     }
     return NewOp;
@@ -135,21 +220,27 @@ static Value *rewriteTaintInst(Instruction &I, Value *Op) {
 
   // Handle fixed-width vector types.
   if (auto *VT = dyn_cast<FixedVectorType>(T)) {
-    constexpr unsigned SupportedBitWidths[] = {512, 256, 128};
     unsigned Bits = VT->getPrimitiveSizeInBits().getFixedValue();
-    // 128-bit vectors are matched by the TAINT128r td patterns. Wider
-    // vectors (YMM/ZMM) have no TAINT256r/TAINT512r form yet, and we
-    // don't decompose into 128-bit halves here, so they fall through to
-    // the LFENCE fallback below.
+
+    // 128-bit vectors are matched directly by the TAINT128r td patterns.
     if (Bits == 128)
       return &I;
 
-    
+    // GPR-sized vectors (e.g. <4 x i8>=32, <8 x i8>=64, <2 x i32>=64): you
+    // can't zext a vector (that re-lays-out the lanes), so bitcast the whole
+    // value to a same-width integer, taint that scalar (GPR-class, matches
+    // TAINT32r / TAINT64r), then bitcast back. Sub-32-bit widths still need the
+    // zext/trunc round trip to reach i32.
+    //
+    // Exclude pointer-element vectors (gather/scatter addresses, `<N x ptr>`):
+    // getPrimitiveSizeInBits() reports 0 for them (so `Bits` would be 0 and
+    // getIntNTy(0) asserts), and `bitcast <N x ptr>` to an integer is illegal
+    // anyway. They fall through to the LFENCE fallback.
+    if (Bits != 0 && Bits <= 64 && !VT->getElementType()->isPointerTy())
+      return taintViaIntBitcast(IRB, Op, T, Bits, &I);
 
-    // TODO: Consider decomposing them into 128-bit chunks?
-    if (Bits % 128 == 0) {
-
-    }
+    // TODO: 256/512-bit (YMM/ZMM) -> split into 128-bit halves + TAINT128r each
+    // (no TAINT256r/TAINT512r form yet). Falls through to LFENCE below.
   }
 
   // Otherwise, LFENCE + identity. Return the original input so the caller
@@ -236,13 +327,35 @@ bool X86LowerSoundSpecIntrinsicsLegacyPass::runOnFunction(Function &F) {
   do {
     Changed = false;
     for (auto &I : make_early_inc_range(instructions(F))) {
-      Value *Op;
-      if (!match(&I, m_Intrinsic<Intrinsic::soundspec_taint>(m_Value(Op))))
+      // Rewrite loads.
+      if (auto *LI = dyn_cast<LoadInst>(&I)) {
+        Changed |= rewriteLoadTaintOut(LI);
         continue;
-      if (auto *NewI = rewriteTaintInst(I, Op); NewI != &I) {
-        I.replaceAllUsesWith(NewI);
-        I.eraseFromParent();
-        Changed = true;
+      }
+
+      // Rewrite stores.
+      if (auto *SI = dyn_cast<StoreInst>(&I)) {
+        Changed |= rewriteStoreTaintOut(SI);
+        continue;
+      }
+
+      // Rewrite taint intrinsics.
+      Value *Op;
+      if (match(&I, m_Intrinsic<Intrinsic::soundspec_taint>(m_Value(Op)))) {
+        // Remove if dead.
+        if (I.uses().empty()) {
+          I.eraseFromParent();
+          Changed = true;
+          continue;
+        }
+
+        // Rewrite non-dead taint.
+        if (auto *NewI = rewriteTaintInst(I, Op); NewI != &I) {
+          I.replaceAllUsesWith(NewI);
+          I.eraseFromParent();
+          Changed = true;
+          continue;
+        }
       }
     }
     ChangedOverall |= Changed;

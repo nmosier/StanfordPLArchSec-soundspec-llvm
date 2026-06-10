@@ -131,6 +131,7 @@
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Scalar/SimpleLoopUnswitch.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Scalar/SoundSpecPreprocess.h"
 #include "llvm/Transforms/Scalar/SpeculativeExecution.h"
 #include "llvm/Transforms/Scalar/TailRecursionElimination.h"
 #include "llvm/Transforms/Scalar/WarnMissedTransforms.h"
@@ -1132,6 +1133,9 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
     MPM.addPass(CoroEarlyPass());
 
     FunctionPassManager EarlyFPM;
+    // SoundSpec: preprocess before SROA / mem2reg so it can see allocas and
+    // pre-SSA memory structure.
+    EarlyFPM.addPass(SoundSpecPreprocessPass());
     EarlyFPM.addPass(EntryExitInstrumenterPass(/*PostInlining=*/false));
     // Lower llvm.expect to metadata before attempting transforms.
     // Compare/branch metadata may alter the behavior of passes like
