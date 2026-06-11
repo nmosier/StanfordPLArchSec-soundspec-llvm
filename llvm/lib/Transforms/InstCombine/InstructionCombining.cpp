@@ -3393,6 +3393,31 @@ Instruction *InstCombinerImpl::visitGetElementPtrInst(GetElementPtrInst &GEP) {
       return replaceOperand(GEP, 0, NewPtrOp);
   }
 
+  // SoundSpec: a single-use taint between two constant-index GEPs blocks
+  // gep-of-gep fusion (PtrOp is the taint call, not a GEPOperator). Reorder it
+  // in place so the inner GEP sits directly under this one:
+  //   gep(taint(gep(Base, C2)), C1)  ->  gep(gep(taint(Base), C2), C1)
+  // The gep-of-gep fold below then fuses them on the next visit, yielding
+  // gep(taint(Base), C1+C2). Mutating the taint in place carries its
+  // !soundspec.public / !soundspec.comment along for free. Constant indices on
+  // both GEPs keep this taint-equivalent (a variable index could itself be a
+  // tainted value); single-use keeps the in-place mutation from disturbing any
+  // other consumer of the taint.
+  if (auto *Taint = dyn_cast<IntrinsicInst>(PtrOp);
+      Taint && Taint->getIntrinsicID() == Intrinsic::soundspec_taint &&
+      Taint->hasOneUse() && GEP.hasAllConstantIndices()) {
+    if (auto *InnerGEP = dyn_cast<GetElementPtrInst>(Taint->getArgOperand(0));
+        InnerGEP && InnerGEP->hasAllConstantIndices()) {
+      auto *MidGEP = cast<GetElementPtrInst>(InnerGEP->clone());
+      MidGEP->insertAfter(Taint);
+      MidGEP->setOperand(0, Taint); // gep(taint(gep(Base,C2)), C2) for now
+      Worklist.add(MidGEP);
+      // taint(gep(Base, C2)) -> taint(Base); the old inner GEP is left for DCE.
+      replaceOperand(*Taint, 0, InnerGEP->getPointerOperand());
+      return replaceOperand(GEP, 0, MidGEP);
+    }
+  }
+
   if (auto *Src = dyn_cast<GEPOperator>(PtrOp))
     if (Instruction *I = visitGEPOfGEP(GEP, Src))
       return I;
